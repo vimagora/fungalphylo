@@ -8,6 +8,7 @@ from fungalphylo.cli.commands import fetch_index as fetch_index_cmd
 from fungalphylo.cli.commands import autoselect as autoselect_cmd
 from fungalphylo.cli.commands import review as review_cmd
 from fungalphylo.cli.commands import restore as restore_cmd
+from fungalphylo.cli.commands import download as download_cmd
 from fungalphylo.cli.commands import stage as stage_cmd
 from fungalphylo.cli.commands import idmap as idmap_cmd
 
@@ -27,6 +28,7 @@ app.add_typer(fetch_index_cmd.app, name="fetch-index")
 app.add_typer(autoselect_cmd.app, name="autoselect")
 app.add_typer(review_cmd.app, name="review")
 app.add_typer(restore_cmd.app, name="restore")
+app.add_typer(download_cmd.app, name="download")
 app.add_typer(stage_cmd.app, name="stage")
 app.add_typer(idmap_cmd.app, name="idmap")
 

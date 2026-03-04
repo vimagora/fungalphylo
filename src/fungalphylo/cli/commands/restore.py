@@ -13,6 +13,8 @@ from rich.progress import (
     TimeRemainingColumn,
     TextColumn,
     MofNCompleteColumn,
+    progress,
+    progress,
 )
 
 import requests
@@ -270,19 +272,21 @@ def restore_command(
         with responses_path.open("w", encoding="utf-8") as rf:
 
             with Progress(
-                TextColumn("Restoring requests..."),
+                TextColumn("Payload:"),
+                TextColumn("{task.fields[payload]:<10}"),
                 BarColumn(),
                 MofNCompleteColumn(),
                 TextColumn("•"),
                 TimeRemainingColumn(),
             ) as progress:
-                task = progress.add_task("Sending restore requests...", total=len(payloads))
+                task = progress.add_task("Downloading", total=len(payloads), payload="-" * 10)
 
                 errors_log = paths.errors_log
                 n_errors = 0
 
                 for i, payload in enumerate(payloads, start=1):
-                    progress.update(task)
+                    progress.update(task, payload=f"{i:03d}/{len(payloads):03d}".ljust(10))
+                    
                     try:
                         stats = payload_stats(payload)
                         payload_len = len(compact_json(payload))
