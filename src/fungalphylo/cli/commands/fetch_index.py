@@ -169,6 +169,7 @@ def fetch_index_command(
     token: Optional[str] = typer.Option(None, "--token", help="JGI token (else uses env JGI_TOKEN)."),
     page_size: int = typer.Option(50, "--page-size", help="Page size (API max is typically 50)."),
     cache_only: bool = typer.Option(False, "--cache-only", help="Only cache JSON, do not ingest into DB."),
+    published_only: bool = typer.Option(False, "--published-only", help="Only fetch published files (file_status='published')."),
     continue_on_error: bool = typer.Option(
         True, "--continue-on-error/--fail-fast", help="Continue fetching even if some portals fail."),
 ) -> None:
@@ -196,7 +197,10 @@ def fetch_index_command(
         if portal_id:
             portals = portal_id
         else:
-            rows = conn.execute("SELECT portal_id FROM portals ORDER BY portal_id").fetchall()
+            if published_only:
+                rows = conn.execute("SELECT portal_id FROM portals WHERE is_published = 1 ORDER BY portal_id").fetchall()
+            else:
+                rows = conn.execute("SELECT portal_id FROM portals ORDER BY portal_id").fetchall()
             portals = [r["portal_id"] for r in rows]
     finally:
         conn.close()
