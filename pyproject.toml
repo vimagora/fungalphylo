@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling>=1.21.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fungalphylo"
+version = "0.0.1"
+description = "Fungal phylogenomics pipeline: ingest → review → stage → compute."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Your Name" }]
+dependencies = [
+  "typer>=0.12.0",
+  "pydantic>=2.6.0",
+  "pyyaml>=6.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "ruff>=0.4.0",
+  "black>=24.1.0",
+]
+
+[project.scripts]
+fungalphylo = "fungalphylo.cli.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fungalphylo"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]  # black handles line length
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
