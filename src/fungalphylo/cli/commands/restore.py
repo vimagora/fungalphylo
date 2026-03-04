@@ -13,8 +13,6 @@ from rich.progress import (
     TimeRemainingColumn,
     TextColumn,
     MofNCompleteColumn,
-    progress,
-    progress,
 )
 
 import requests
