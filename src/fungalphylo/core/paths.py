@@ -25,6 +25,10 @@ class ProjectPaths:
     @property
     def events_log(self) -> Path:
         return self.logs_dir / "events.jsonl"
+    
+    @property
+    def errors_log(self) -> Path:
+        return self.logs_dir / "errors.jsonl"
 
     # --- database ---
     @property
@@ -46,6 +50,15 @@ class ProjectPaths:
         Convention: raw/<portal_id>/<file_id>/
         """
         return self.raw_dir / portal_id / file_id
+    
+    # --- jgi cache ---
+    @property
+    def cache_dir(self) -> Path:
+        return self.root / "cache"
+
+    @property
+    def jgi_index_cache_dir(self) -> Path:
+        return self.cache_dir / "jgi_index_json"
 
     # --- staging ---
     @property
@@ -118,6 +131,7 @@ def ensure_project_dirs(p: ProjectPaths) -> None:
         p.raw_dir,
         p.staging_root,
         p.runs_root,
+        p.cache_dir,
     ]:
         d.mkdir(parents=True, exist_ok=True)
 

@@ -10,10 +10,15 @@ CREATE TABLE IF NOT EXISTS meta (
 
 -- Portals (MycoCosm/JGI portal IDs are immutable; version is encoded in the portal_id string)
 CREATE TABLE IF NOT EXISTS portals (
-  portal_id   TEXT PRIMARY KEY,
-  name        TEXT,
-  created_at  TEXT NOT NULL,
-  meta_json   TEXT
+  portal_id      TEXT PRIMARY KEY,
+  name           TEXT,
+  created_at     TEXT NOT NULL,
+  published_text TEXT,
+  published_url  TEXT,
+  is_published   INTEGER NOT NULL DEFAULT 0,
+  dataset_id   TEXT,
+  top_hit_id   TEXT,
+  meta_json      TEXT
 );
 
 -- Files available for a portal (candidates discovered by ingest/fetch-index)

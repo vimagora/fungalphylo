@@ -20,6 +20,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # Where staging expects downloaded raw files to be located.
         # Convention: raw/<portal_id>/<file_id>/<filename>
         "raw_layout": "raw/{portal_id}/{file_id}/{filename}",
+        "default_idmaps_dir": "idmaps",
     },
     # Autoselect explainability
     "autoselect": {
