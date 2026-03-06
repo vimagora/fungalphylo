@@ -80,7 +80,7 @@ def busco_slurm_command(
     bin_dir = busco_bin_dir.expanduser().resolve() if busco_bin_dir else tools.busco.bin_dir
     busco_cmd = tools.busco.command or "busco"
 
-    if bin_dir is None:#or not bin_dir.exists():
+    if bin_dir is None or not bin_dir.exists():
         raise typer.BadParameter(
             "BUSCO path not configured or does not exist.\n"
             "Set tools.yaml:\n"
