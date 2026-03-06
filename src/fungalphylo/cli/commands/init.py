@@ -9,6 +9,7 @@ from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.core.config import write_default_config
 from fungalphylo.core.events import log_event
 from fungalphylo.db.db import init_db
+from fungalphylo.core.tools import TOOLS_YAML_TEMPLATE
 
 app = typer.Typer(help="Initialize a new fungalphylo project directory.")
 
@@ -44,6 +45,12 @@ def init_command(
         typer.echo(f"config.yaml already exists: {paths.config_yaml} (use --force to overwrite)")
     else:
         write_default_config(paths.config_yaml)
+
+    # 
+    if paths.tools_yaml.exists() and not force:
+        typer.echo(f"tools.yaml already exists: {paths.tools_yaml} (use --force to overwrite)")
+    else:
+        paths.tools_yaml.write_text(TOOLS_YAML_TEMPLATE, encoding="utf-8")
 
     # db
     init_db(paths.db_path)

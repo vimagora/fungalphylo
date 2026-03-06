@@ -17,6 +17,10 @@ class ProjectPaths:
     @property
     def config_yaml(self) -> Path:
         return self.root / "config.yaml"
+    
+    @property
+    def tools_yaml(self) -> Path:
+        return self.root / "tools.yaml"
 
     @property
     def logs_dir(self) -> Path:
