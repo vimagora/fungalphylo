@@ -164,7 +164,7 @@ def chunk_restore_payloads(
     return payloads
 
 
-def post_restore(payload: Dict[str, Any], token: str, timeout: int = 60) -> Dict[str, Any]:
+def post_restore(payload: Dict[str, Any], token: str, timeout: int = 120) -> Dict[str, Any]:
     headers = {
         "accept": "application/json",
         "Authorization": f"{token}",

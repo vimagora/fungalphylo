@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import gzip
+import json
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -9,8 +10,17 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import typer
+from rich.progress import (
+    Progress,
+    BarColumn,
+    TimeRemainingColumn,
+    TimeElapsedColumn,
+    TextColumn,
+    MofNCompleteColumn,
+)
 
 from fungalphylo.core.config import load_yaml, resolve_config
+from fungalphylo.core.errors import exception_record, log_error_jsonl
 from fungalphylo.core.events import log_event
 from fungalphylo.core.fasta import FastaRecord, iter_fasta, write_fasta
 from fungalphylo.core.hash import sha256_file, write_checksums_tsv
@@ -25,7 +35,12 @@ from fungalphylo.db.queries import fetch_approvals_with_files
 
 app = typer.Typer(help="Create an immutable staging snapshot from approved downloads.")
 
+PORTAL_WIDTH = 18
 JGI_PIPE_RE = re.compile(r"^jgi\|([^|]+)\|(\d+)\|([^|\s]+)")
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def resolve_default_idmap(project_dir: Path, cfg: dict, explicit: Optional[Path]) -> Optional[Path]:
@@ -43,6 +58,11 @@ def resolve_default_idmap(project_dir: Path, cfg: dict, explicit: Optional[Path]
 
 
 def parse_jgi_pipe_header(header: str) -> tuple[str, str, str]:
+    """
+    Returns: (portal_in_header, numeric_id, model_id)
+    Proteins:  jgi|PORTAL|PROTEIN_NUM|MODEL
+    CDS/Tx:    jgi|PORTAL|TRANSCRIPT_NUM|MODEL   (numeric differs; MODEL links)
+    """
     first = header.split()[0]
     m = JGI_PIPE_RE.match(first)
     if not m:
@@ -51,12 +71,20 @@ def parse_jgi_pipe_header(header: str) -> tuple[str, str, str]:
 
 
 def extract_model_token(header: str) -> str:
+    """
+    For non-JGI headers, take the first token before whitespace or '|'
+    Example: 'PTRG_00001 | ...' -> 'PTRG_00001'
+    """
     h = header.strip()
     token = re.split(r"[\s|]+", h, maxsplit=1)[0]
     return token
 
 
 def detect_header_mode(fasta_path: Path, probe_n: int = 25) -> str:
+    """
+    Returns 'jgi_pipe' only if ALL of the first probe_n headers match JGI pipe.
+    Otherwise returns 'non_jgi' (proteome-level behavior).
+    """
     n = 0
     jgi_hits = 0
     for rec in iter_fasta(fasta_path):
@@ -92,6 +120,10 @@ def stage_proteome_jgi(
     max_len: int,
     mapping_writer: csv.writer,
 ) -> tuple[dict, dict]:
+    """
+    Stage protein FASTA with canonical headers {portal_id}|{protein_num}.
+    Returns: (stats, model_id -> canonical_protein_id)
+    """
     stats = defaultdict(int)
     model_to_canon: dict[str, str] = {}
     staged_records: list[FastaRecord] = []
@@ -129,6 +161,9 @@ def stage_cds_jgi(
     portal_id: str,
     model_to_canon: dict[str, str],
 ) -> dict:
+    """
+    Stage CDS/transcript FASTA by mapping model_id -> canonical protein ID.
+    """
     stats = defaultdict(int)
     staged_records: list[FastaRecord] = []
 
@@ -158,14 +193,12 @@ def stage_cds_jgi(
 
 def _lookup_non_jgi_canon(rec_header: str, idmap: PortalIdMap) -> tuple[Optional[str], Optional[str]]:
     """
-    Primary: exact original_header match.
+    Primary: exact original_header match (rec_header).
     Fallback: model token match (if the map has model_to_canon).
-    Returns (canonical_id, model_id_used_or_token).
+    Returns (canonical_id, model_id_or_token_for_map_tsv)
     """
     if rec_header in idmap.header_to_canon:
-        canon = idmap.header_to_canon[rec_header]
-        # If user provided model_id, we can't recover it here reliably; keep token for report/mapping TSV.
-        return canon, None
+        return idmap.header_to_canon[rec_header], None
 
     token = extract_model_token(rec_header)
     if token in idmap.model_to_canon:
@@ -184,8 +217,12 @@ def stage_proteome_non_jgi(
     mapping_writer: csv.writer,
     idmap: PortalIdMap,
 ) -> tuple[dict, dict]:
+    """
+    Stage non-JGI proteome using idmap (header→canon primary).
+    Returns: (stats, token->canon map for possible CDS token matching)
+    """
     stats = defaultdict(int)
-    model_to_canon: dict[str, str] = {}
+    token_to_canon: dict[str, str] = {}
     staged_records: list[FastaRecord] = []
 
     for rec in iter_fasta(in_path):
@@ -207,26 +244,25 @@ def stage_proteome_non_jgi(
         staged_records.append(FastaRecord(header=canon, sequence=rec.sequence))
         stats["kept"] += 1
 
-        # For CDS staging later, token-based mapping helps only if CDS tokens align.
         if token:
-            model_to_canon[token] = canon
+            token_to_canon[token] = canon
 
     write_fasta(staged_records, out_path)
     validate_fasta_headers_are_canonical(out_path)
-    return dict(stats), model_to_canon
+    return dict(stats), token_to_canon
 
 
 def stage_cds_non_jgi(
     *,
     in_path: Path,
     out_path: Path,
-    model_to_canon: dict[str, str],
+    token_to_canon: dict[str, str],
     idmap_cds: Optional[PortalIdMap],
 ) -> dict:
     """
-    For non-JGI CDS, we try token-based mapping:
-      token -> canon
-    If user supplies idmap_cds with header_to_canon, we also try exact header mapping.
+    For non-JGI CDS, attempt:
+      1) exact header lookup via idmap_cds.header_to_canon (if provided)
+      2) token lookup via token_to_canon
     """
     stats = defaultdict(int)
     staged_records: list[FastaRecord] = []
@@ -239,7 +275,7 @@ def stage_cds_non_jgi(
             canon = idmap_cds.header_to_canon[rec.header]
         else:
             token = extract_model_token(rec.header)
-            canon = model_to_canon.get(token)
+            canon = token_to_canon.get(token)
 
         if canon is None:
             stats["dropped_no_protein_match"] += 1
@@ -260,39 +296,41 @@ def stage_command(
     portal_id: Optional[List[str]] = typer.Option(None, "--portal-id", help="Stage only specific portal IDs."),
     min_aa: Optional[int] = typer.Option(None, help="Override staging.min_aa."),
     max_aa: Optional[int] = typer.Option(None, help="Override staging.max_aa."),
-    probe_n: int = typer.Option(25, "--probe-n", help="Number of headers to probe when detecting header mode."),
+    probe_n: int = typer.Option(25, "--probe-n", help="Headers to probe when detecting JGI header mode."),
     id_map: Optional[Path] = typer.Option(
         None,
         "--id-map",
-        help=(
-            "Mapping for non-JGI portals. Either a directory of <portal_id>.tsv "
-            "or a combined TSV with portal_id plus mapping columns."
-        ),
+        help="Mapping for non-JGI portals (dir of <portal>.tsv OR combined TSV).",
     ),
     id_map_cds: Optional[Path] = typer.Option(
         None,
         "--id-map-cds",
         help="Optional separate mapping for non-JGI CDS headers (same formats as --id-map).",
     ),
-    continue_on_error: bool = typer.Option(False, "--continue-on-error", help="Stage what you can; report failures."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Validate inputs and show what would be staged."),
+    continue_on_error: bool = typer.Option(
+        True, "--continue-on-error", help="Stage what you can; log failures and continue."
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preflight only: detect issues, do not write outputs."),
 ) -> None:
     if ctx.invoked_subcommand is not None:
         return
     if project_dir is None:
-        raise typer.BadParameter("PROJECT_DIR is required when calling `fungalphylo stage` without a subcommand.")
+        raise typer.BadParameter("PROJECT_DIR is required when calling `fungalphylo stage`.")
 
     project_dir = project_dir.expanduser().resolve()
     paths = ProjectPaths(project_dir)
     ensure_project_dirs(paths)
 
-    project_cfg = load_yaml(paths.config_yaml)
-    cli_overrides = {"staging": {}}
+    cfg = resolve_config(project_config=load_yaml(paths.config_yaml), cli_overrides={"staging": {}})
     if min_aa is not None:
-        cli_overrides["staging"]["min_aa"] = min_aa
+        cfg = resolve_config(project_config=load_yaml(paths.config_yaml), cli_overrides={"staging": {"min_aa": min_aa}})
     if max_aa is not None:
-        cli_overrides["staging"]["max_aa"] = max_aa
-    cfg = resolve_config(project_config=project_cfg, cli_overrides=cli_overrides)
+        # merge carefully with possibly-set min_aa
+        ov = {"staging": {}}
+        if min_aa is not None:
+            ov["staging"]["min_aa"] = min_aa
+        ov["staging"]["max_aa"] = max_aa
+        cfg = resolve_config(project_config=load_yaml(paths.config_yaml), cli_overrides=ov)
 
     stg_cfg = cfg["staging"]
     raw_layout = stg_cfg["raw_layout"]
@@ -302,6 +340,8 @@ def stage_command(
     resolved_id_map = resolve_default_idmap(project_dir, cfg, id_map)
     resolved_id_map_cds = resolve_default_idmap(project_dir, cfg, id_map_cds) or resolved_id_map
 
+    errors_log = paths.errors_log
+
     conn = connect(paths.db_path)
     try:
         approvals = fetch_approvals_with_files(conn, portal_ids=portal_id)
@@ -309,7 +349,7 @@ def stage_command(
         conn.close()
 
     if not approvals:
-        raise typer.BadParameter("No approved portals found. Apply approvals before staging.")
+        raise typer.BadParameter("No approved portals found. Run `review apply` first.")
 
     staging_id = new_staging_id()
     stg_dir = paths.staging_dir(staging_id)
@@ -338,201 +378,255 @@ def stage_command(
         map_writer = csv.writer(map_f, delimiter="\t")
         map_writer.writerow(["canonical_protein_id", "original_header", "length_aa", "model_id_or_token"])
 
-    try:
-        for a in approvals:
-            pid = a["portal_id"]
-            prot_file_id = a["proteome_file_id"]
-            prot_filename = a["proteome_filename"]
+    # Progress bar across portals
+    with Progress(
+        TextColumn("Portal:"),
+        TextColumn("{task.fields[portal]:<18}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TextColumn("•"),
+        TimeElapsedColumn(),
+        TextColumn("•"),
+        TimeRemainingColumn(),
+    ) as progress:
+        task = progress.add_task("Staging", total=len(approvals), portal="-" * PORTAL_WIDTH)
 
-            raw_prot = resolve_raw_path(
-                project_dir, raw_layout=raw_layout, portal_id=pid, file_id=prot_file_id, filename=prot_filename
-            )
-            if not raw_prot.exists():
-                reason = f"missing raw proteome: {raw_prot}"
-                failures.append((pid, reason, ""))
-                if not continue_on_error:
-                    raise FileNotFoundError(
-                        f"Missing raw proteome file for {pid}: {raw_prot}\n"
-                        f"raw_layout={raw_layout!r}. Expected raw/<portal_id>/<file_id>/<filename> style path."
-                    )
-                continue
+        try:
+            for a in approvals:
+                pid = a["portal_id"]
+                progress.update(task, portal=(pid[:PORTAL_WIDTH]).ljust(PORTAL_WIDTH))
 
-            prot_mode = detect_header_mode(raw_prot, probe_n=probe_n)
+                try:
+                    prot_file_id = a["proteome_file_id"]
+                    prot_filename = a["proteome_filename"]
 
-            if dry_run:
-                needs_map = (prot_mode != "jgi_pipe")
-                map_status = "n/a"
-                if needs_map:
-                    if resolved_id_map is None:
-                        map_status = "missing (no idmaps dir and no --id-map)"
-                    else:
-                        try:
-                            _ = load_id_map(resolved_id_map, pid)
-                            map_status = f"ok ({resolved_id_map})"
-                        except Exception as e:
-                            map_status = f"invalid ({resolved_id_map}): {e}"
-
-                typer.echo(f"[dry-run] {pid}: proteome_mode={prot_mode} needs_idmap={needs_map} idmap={map_status}")
-
-                # Check CDS raw file if present
-                if a["cds_file_id"] and a["cds_filename"]:
-                    raw_cds = resolve_raw_path(
+                    raw_prot = resolve_raw_path(
                         project_dir,
                         raw_layout=raw_layout,
                         portal_id=pid,
-                        file_id=a["cds_file_id"],
-                        filename=a["cds_filename"],
+                        file_id=prot_file_id,
+                        filename=prot_filename,
                     )
-                    cds_exists = raw_cds.exists()
-                    typer.echo(f"[dry-run] {pid}: raw_cds_exists={cds_exists} path={raw_cds}")
-                else:
-                    typer.echo(f"[dry-run] {pid}: no approved CDS")
-                continue
-
-            assert map_writer is not None
-            out_prot = prot_dir / f"{pid}.faa.gz"
-
-            portal_entry: Dict[str, object] = {
-                "portal_id": pid,
-                "proteome": {
-                    "file_id": prot_file_id,
-                    "filename": prot_filename,
-                    "raw_path": str(raw_prot.relative_to(project_dir)),
-                    "raw_sha256": sha256_file(raw_prot),
-                    "staged_path": str(out_prot.relative_to(project_dir)),
-                },
-                "cds": None,
-            }
-
-            # --- Proteome staging ---
-            model_to_canon: dict[str, str] = {}
-            if prot_mode == "jgi_pipe":
-                prot_stats, model_to_canon = stage_proteome_jgi(
-                    in_path=raw_prot,
-                    out_path=out_prot,
-                    portal_id=pid,
-                    min_len=min_len,
-                    max_len=max_len,
-                    mapping_writer=map_writer,
-                )
-                portal_entry["proteome"]["mode"] = "jgi_pipe"  # type: ignore[index]
-            else:
-                if resolved_id_map is None:
-                    sample = reports_dir / f"sample_headers_{pid}_proteome.txt"
-                    write_sample_headers(raw_prot, sample, n=20)
-                    reason = "non-JGI proteome headers; provide --id-map (universal map preferred)"
-                    failures.append((pid, reason, str(sample.relative_to(project_dir))))
-                    if not continue_on_error:
-                        raise RuntimeError(f"{pid}: {reason}. See {sample}")
-                    continue
-
-                pmap = load_id_map(resolved_id_map, pid)
-                prot_stats, model_to_canon = stage_proteome_non_jgi(
-                    in_path=raw_prot,
-                    out_path=out_prot,
-                    portal_id=pid,
-                    min_len=min_len,
-                    max_len=max_len,
-                    mapping_writer=map_writer,
-                    idmap=pmap,
-                )
-
-                # Proteome-level completeness: require full coverage.
-                if prot_stats.get("missing_in_id_map", 0) > 0:
-                    sample = reports_dir / f"sample_headers_{pid}_proteome.txt"
-                    write_sample_headers(raw_prot, sample, n=20)
-                    reason = f"id-map incomplete for proteome (missing {prot_stats['missing_in_id_map']}). Provide full map."
-                    failures.append((pid, reason, str(sample.relative_to(project_dir))))
-                    try:
-                        out_prot.unlink(missing_ok=True)
-                    except Exception:
-                        pass
-                    if not continue_on_error:
-                        raise RuntimeError(f"{pid}: {reason}. See {sample}")
-                    continue
-
-                portal_entry["proteome"]["mode"] = "non_jgi+resolved_id_map(header→canon)"  # type: ignore[index]
-
-            portal_entry["proteome"]["staged_sha256"] = sha256_file(out_prot)  # type: ignore[index]
-            portal_entry["proteome"]["stats"] = prot_stats  # type: ignore[index]
-
-            # --- Optional CDS ---
-            if a["cds_file_id"] and a["cds_filename"]:
-                cds_file_id = a["cds_file_id"]
-                cds_filename = a["cds_filename"]
-
-                raw_cds = resolve_raw_path(
-                    project_dir, raw_layout=raw_layout, portal_id=pid, file_id=cds_file_id, filename=cds_filename
-                )
-                if not raw_cds.exists():
-                    reason = f"missing raw CDS: {raw_cds}"
-                    failures.append((pid, reason, ""))
-                    if not continue_on_error:
-                        raise FileNotFoundError(
-                            f"Missing raw CDS file for {pid}: {raw_cds}\n"
-                            f"raw_layout={raw_layout!r}. Expected raw/<portal_id>/<file_id>/<filename> style path."
+                    if not raw_prot.exists():
+                        msg = (
+                            f"Missing raw proteome file: {raw_prot} "
+                            f"(raw_layout={raw_layout!r})"
                         )
-                else:
-                    out_cds = cds_dir / f"{pid}.fna.gz"
-                    cds_entry: Dict[str, object] = {
-                        "file_id": cds_file_id,
-                        "filename": cds_filename,
-                        "raw_path": str(raw_cds.relative_to(project_dir)),
-                        "raw_sha256": sha256_file(raw_cds),
-                        "staged_path": str(out_cds.relative_to(project_dir)),
+                        failures.append((pid, msg, ""))
+                        log_error_jsonl(errors_log, {"event": "stage_error", "portal_id": pid, "stage": "raw_missing", "path": str(raw_prot)})
+                        if not continue_on_error:
+                            raise FileNotFoundError(msg)
+                        continue
+
+                    prot_mode = detect_header_mode(raw_prot, probe_n=probe_n)
+
+                    # DRY-RUN preflight output
+                    if dry_run:
+                        needs_map = (prot_mode != "jgi_pipe")
+                        map_status = "n/a"
+                        if needs_map:
+                            if resolved_id_map is None:
+                                map_status = "missing (no idmaps dir and no --id-map)"
+                            else:
+                                try:
+                                    _ = load_id_map(resolved_id_map, pid)
+                                    map_status = f"ok ({resolved_id_map})"
+                                except Exception as e:
+                                    map_status = f"invalid ({resolved_id_map}): {type(e).__name__}: {e}"
+
+                        typer.echo(f"[dry-run] {pid}: proteome_mode={prot_mode} needs_idmap={needs_map} idmap={map_status}")
+
+                        # Check CDS/transcript raw file presence if approved
+                        if a["cds_file_id"] and a["cds_filename"]:
+                            raw_cds = resolve_raw_path(
+                                project_dir,
+                                raw_layout=raw_layout,
+                                portal_id=pid,
+                                file_id=a["cds_file_id"],
+                                filename=a["cds_filename"],
+                            )
+                            cds_exists = raw_cds.exists()
+                            typer.echo(f"[dry-run] {pid}: raw_cds_exists={cds_exists} path={raw_cds}")
+                        else:
+                            typer.echo(f"[dry-run] {pid}: no approved CDS/transcript")
+                        continue
+
+                    assert map_writer is not None
+
+                    out_prot = prot_dir / f"{pid}.faa.gz"
+                    portal_entry: Dict[str, object] = {
+                        "portal_id": pid,
+                        "proteome": {
+                            "file_id": prot_file_id,
+                            "filename": prot_filename,
+                            "raw_path": str(raw_prot.relative_to(project_dir)),
+                            "raw_sha256": sha256_file(raw_prot),
+                            "staged_path": str(out_prot.relative_to(project_dir)),
+                        },
+                        "cds": None,
                     }
 
+                    # --- Proteome staging ---
+                    token_to_canon: dict[str, str] = {}
                     if prot_mode == "jgi_pipe":
-                        cds_stats = stage_cds_jgi(
-                            in_path=raw_cds, out_path=out_cds, portal_id=pid, model_to_canon=model_to_canon
+                        prot_stats, model_to_canon = stage_proteome_jgi(
+                            in_path=raw_prot,
+                            out_path=out_prot,
+                            portal_id=pid,
+                            min_len=min_len,
+                            max_len=max_len,
+                            mapping_writer=map_writer,
                         )
-                        cds_entry["mode"] = "jgi_pipe(model_id→protein)"
+                        portal_entry["proteome"]["mode"] = "jgi_pipe"  # type: ignore[index]
+                        portal_entry["proteome"]["staged_sha256"] = sha256_file(out_prot)  # type: ignore[index]
+                        portal_entry["proteome"]["stats"] = prot_stats  # type: ignore[index]
+                        token_to_canon = model_to_canon  # model_id -> canon works as token map
                     else:
-                        cds_map_obj = None
-                        if resolved_id_map_cds is not None:
-                            cds_map_obj = load_id_map(resolved_id_map_cds, pid)
+                        if resolved_id_map is None:
+                            sample = reports_dir / f"sample_headers_{pid}_proteome.txt"
+                            write_sample_headers(raw_prot, sample, n=20)
+                            reason = "non-JGI proteome headers; provide idmap (default: project/idmaps/<portal>.tsv)"
+                            failures.append((pid, reason, str(sample.relative_to(project_dir))))
+                            log_error_jsonl(errors_log, {"event": "stage_error", "portal_id": pid, "stage": "idmap_missing", "sample": str(sample)})
+                            if not continue_on_error:
+                                raise RuntimeError(f"{pid}: {reason}. See {sample}")
+                            continue
 
-                        cds_stats = stage_cds_non_jgi(
-                            in_path=raw_cds,
-                            out_path=out_cds,
-                            model_to_canon=model_to_canon,
-                            idmap_cds=cds_map_obj,
+                        pmap = load_id_map(resolved_id_map, pid)
+                        prot_stats, token_to_canon = stage_proteome_non_jgi(
+                            in_path=raw_prot,
+                            out_path=out_prot,
+                            portal_id=pid,
+                            min_len=min_len,
+                            max_len=max_len,
+                            mapping_writer=map_writer,
+                            idmap=pmap,
                         )
 
-                        # If CDS dropped heavily, user likely needs --id-map-cds with header_to_canon for CDS.
-                        if cds_stats.get("dropped_no_protein_match", 0) > 0 and resolved_id_map_cds is None:
-                            sample = reports_dir / f"sample_headers_{pid}_cds.txt"
-                            write_sample_headers(raw_cds, sample, n=20)
-                            reason = (
-                                f"CDS tokens didn't match proteome tokens (dropped {cds_stats['dropped_no_protein_match']}). "
-                                f"Provide --id-map-cds for exact CDS header mapping."
-                            )
+                        # Non-JGI completeness: must cover all headers
+                        if prot_stats.get("missing_in_id_map", 0) > 0:
+                            sample = reports_dir / f"sample_headers_{pid}_proteome.txt"
+                            write_sample_headers(raw_prot, sample, n=20)
+                            reason = f"id-map incomplete for proteome (missing {prot_stats['missing_in_id_map']}). Provide full map."
                             failures.append((pid, reason, str(sample.relative_to(project_dir))))
+                            log_error_jsonl(errors_log, {"event": "stage_error", "portal_id": pid, "stage": "idmap_incomplete", "missing": prot_stats["missing_in_id_map"]})
                             try:
-                                out_cds.unlink(missing_ok=True)
+                                out_prot.unlink(missing_ok=True)
                             except Exception:
                                 pass
                             if not continue_on_error:
                                 raise RuntimeError(f"{pid}: {reason}. See {sample}")
-                            cds_entry = None
+                            continue
+
+                        portal_entry["proteome"]["mode"] = "non_jgi+idmap(header→canon)"  # type: ignore[index]
+                        portal_entry["proteome"]["staged_sha256"] = sha256_file(out_prot)  # type: ignore[index]
+                        portal_entry["proteome"]["stats"] = prot_stats  # type: ignore[index]
+
+                    # --- Optional CDS/transcript staging ---
+                    if a["cds_file_id"] and a["cds_filename"]:
+                        cds_file_id = a["cds_file_id"]
+                        cds_filename = a["cds_filename"]
+
+                        raw_cds = resolve_raw_path(
+                            project_dir,
+                            raw_layout=raw_layout,
+                            portal_id=pid,
+                            file_id=cds_file_id,
+                            filename=cds_filename,
+                        )
+                        if not raw_cds.exists():
+                            reason = f"missing raw CDS/transcript: {raw_cds}"
+                            failures.append((pid, reason, ""))
+                            log_error_jsonl(errors_log, {"event": "stage_error", "portal_id": pid, "stage": "raw_missing_cds", "path": str(raw_cds)})
+                            if not continue_on_error:
+                                raise FileNotFoundError(reason)
                         else:
-                            cds_entry["mode"] = "non_jgi(token/header→canon)"
+                            out_cds = cds_dir / f"{pid}.fna.gz"
+                            cds_entry: Dict[str, object] = {
+                                "file_id": cds_file_id,
+                                "filename": cds_filename,
+                                "raw_path": str(raw_cds.relative_to(project_dir)),
+                                "raw_sha256": sha256_file(raw_cds),
+                                "staged_path": str(out_cds.relative_to(project_dir)),
+                            }
 
-                    if cds_entry:
-                        cds_entry["staged_sha256"] = sha256_file(out_cds)
-                        cds_entry["stats"] = cds_stats
-                        portal_entry["cds"] = cds_entry
+                            if prot_mode == "jgi_pipe":
+                                cds_stats = stage_cds_jgi(
+                                    in_path=raw_cds,
+                                    out_path=out_cds,
+                                    portal_id=pid,
+                                    model_to_canon=token_to_canon,  # model_id -> canon
+                                )
+                                cds_entry["mode"] = "jgi_pipe(model_id→protein)"
+                            else:
+                                cds_map_obj = None
+                                if resolved_id_map_cds is not None:
+                                    try:
+                                        cds_map_obj = load_id_map(resolved_id_map_cds, pid)
+                                    except Exception:
+                                        cds_map_obj = None
 
-            per_portal[pid] = portal_entry
+                                cds_stats = stage_cds_non_jgi(
+                                    in_path=raw_cds,
+                                    out_path=out_cds,
+                                    token_to_canon=token_to_canon,
+                                    idmap_cds=cds_map_obj,
+                                )
 
-    finally:
-        if map_f is not None:
-            map_f.close()
+                                # If we dropped entries and no cds map provided, likely tokens differ.
+                                if cds_stats.get("dropped_no_protein_match", 0) > 0 and resolved_id_map_cds is None:
+                                    sample = reports_dir / f"sample_headers_{pid}_cds.txt"
+                                    write_sample_headers(raw_cds, sample, n=20)
+                                    reason = (
+                                        f"CDS tokens didn't match proteome mapping (dropped {cds_stats['dropped_no_protein_match']}). "
+                                        f"Provide --id-map-cds for exact CDS header mapping."
+                                    )
+                                    failures.append((pid, reason, str(sample.relative_to(project_dir))))
+                                    log_error_jsonl(errors_log, {"event": "stage_error", "portal_id": pid, "stage": "cds_mapping_needed", "dropped": cds_stats["dropped_no_protein_match"]})
+                                    try:
+                                        out_cds.unlink(missing_ok=True)
+                                    except Exception:
+                                        pass
+                                    if not continue_on_error:
+                                        raise RuntimeError(f"{pid}: {reason}. See {sample}")
+                                    cds_entry = None
+                                else:
+                                    cds_entry["mode"] = "non_jgi(header/token→canon)"
+
+                            if cds_entry:
+                                cds_entry["staged_sha256"] = sha256_file(out_cds)
+                                cds_entry["stats"] = cds_stats
+                                portal_entry["cds"] = cds_entry
+
+                    per_portal[pid] = portal_entry
+
+                except Exception as e:
+                    # Portal-level exception handling
+                    log_error_jsonl(
+                        errors_log,
+                        {
+                            "event": "stage_error",
+                            "portal_id": pid,
+                            "stage": "portal_exception",
+                            **exception_record(e),
+                        },
+                    )
+                    failures.append((pid, f"{type(e).__name__}: {e}", ""))
+                    if not continue_on_error:
+                        raise
+
+                finally:
+                    progress.advance(task)
+
+        finally:
+            if map_f is not None:
+                map_f.close()
 
     if dry_run:
         typer.echo("[dry-run] Done.")
         return
 
+    # Write failures report
     if failures:
         reports_dir.mkdir(parents=True, exist_ok=True)
         with failed_report.open("w", encoding="utf-8", newline="") as f:
@@ -541,6 +635,7 @@ def stage_command(
             for pid, reason, sample in failures:
                 w.writerow([pid, reason, sample])
 
+    # checksums
     checksum_rows.append((str(map_path.relative_to(project_dir)), sha256_file(map_path)))
     for pid, info in per_portal.items():
         prot_rel = info["proteome"]["staged_path"]  # type: ignore[index]
@@ -552,11 +647,13 @@ def stage_command(
 
     manifest = {
         "staging_id": staging_id,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": _now_iso(),
         "protein_id_scheme": cfg["staging"]["protein_id_scheme"],
         "thresholds": {"min_aa": min_len, "max_aa": max_len},
         "raw_layout": raw_layout,
         "probe_n": probe_n,
+        "id_map": str(resolved_id_map) if resolved_id_map else None,
+        "id_map_cds": str(resolved_id_map_cds) if resolved_id_map_cds else None,
         "portals": per_portal,
         "failures_report": str(failed_report.relative_to(project_dir)) if failures else None,
         "artifacts": {
@@ -575,11 +672,12 @@ def stage_command(
     checksums_path = paths.staging_checksums(staging_id)
     write_checksums_tsv(checksum_rows, checksums_path)
 
+    # Register staging in DB
     conn = connect(paths.db_path)
     try:
         conn.execute(
             "INSERT INTO stagings(staging_id, created_at, manifest_path, manifest_sha256) VALUES(?,?,?,?)",
-            (staging_id, datetime.now(timezone.utc).isoformat(), str(manifest_path.relative_to(project_dir)), manifest_sha),
+            (staging_id, _now_iso(), str(manifest_path.relative_to(project_dir)), manifest_sha),
         )
         conn.commit()
     finally:
@@ -588,7 +686,7 @@ def stage_command(
     log_event(
         project_dir,
         {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": _now_iso(),
             "event": "stage",
             "staging_id": staging_id,
             "n_portals": len(per_portal),

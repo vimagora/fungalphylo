@@ -13,6 +13,7 @@ from fungalphylo.cli.commands import stage as stage_cmd
 from fungalphylo.cli.commands import idmap as idmap_cmd
 
 from fungalphylo.cli.commands import db as db_cmd
+from fungalphylo.cli.commands import status as status_cmd
 
 
 app = typer.Typer(
@@ -35,6 +36,8 @@ app.add_typer(idmap_cmd.app, name="idmap")
 
 #helpers
 app.add_typer(db_cmd.app, name="db")
+app.add_typer(status_cmd.app, name="status")
+app.add_typer(idmap_cmd.app, name="idmap")
 
 
 def main() -> None:

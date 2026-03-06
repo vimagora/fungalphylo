@@ -82,6 +82,25 @@ class ProjectPaths:
 
     def staging_checksums(self, staging_id: str) -> Path:
         return self.staging_dir(staging_id) / "checksums.tsv"
+    
+    # --- staged files ready for compute ---
+    @property
+    def staged_dir(self) -> Path:
+        return self.root / "staged"
+    
+    def staged_proteome_dir(self, portal_id: str) -> Path:
+        return self.staged_dir / "proteome"
+    
+    def staged_cds_dir(self, portal_id: str) -> Path:
+        return self.staged_dir / "cds"
+    
+     # --- staged files ready for compute ---
+    @property
+    def idmaps_dir(self) -> Path:
+        return self.root / "idmaps"
+    
+    def staged_proteome_dir(self, portal_id: str) -> Path:
+        return self.idmaps_dir / "generated"
 
     # --- compute runs ---
     @property
@@ -132,6 +151,8 @@ def ensure_project_dirs(p: ProjectPaths) -> None:
         p.staging_root,
         p.runs_root,
         p.cache_dir,
+        p.idmaps_dir,
+        p.staged_dir,
     ]:
         d.mkdir(parents=True, exist_ok=True)
 

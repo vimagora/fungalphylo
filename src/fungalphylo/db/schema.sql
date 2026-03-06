@@ -68,3 +68,17 @@ CREATE TABLE IF NOT EXISTS runs (
   manifest_sha256 TEXT NOT NULL,
   FOREIGN KEY (staging_id) REFERENCES stagings(staging_id)
 );
+
+-- Staged files for a portal and kind (current best effort for what should be used in runs; can be updated until staging is finalized)
+CREATE TABLE IF NOT EXISTS staged_files (
+  portal_id      TEXT NOT NULL,
+  kind           TEXT NOT NULL, -- 'proteome' or 'cds'
+  file_id        TEXT NOT NULL, -- source portal_files.file_id
+  raw_sha256     TEXT NOT NULL,
+  staged_path    TEXT NOT NULL,
+  staged_sha256  TEXT NOT NULL,
+  created_at     TEXT NOT NULL,
+  params_json    TEXT,
+  PRIMARY KEY (portal_id, kind),
+  FOREIGN KEY (portal_id) REFERENCES portals(portal_id) ON DELETE CASCADE
+);
