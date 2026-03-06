@@ -292,13 +292,12 @@ def fetch_index_command(
 
                             meta = f.get("metadata") or {}
                             myco_pid = meta.get("mycocosm_portal_id") or f.get("portal_detail_id") or pid
-
+                            
                             # ✅ guard: only insert file rows for portals that exist in portals table
                             if myco_pid not in portal_set:
-                                myco_pid = pid
-                                # skipped_foreign_portal += 1
-                                # continue
-                            
+                                skipped_foreign_portal += 1
+                                continue
+
                             jat_label = meta.get("jat_label") or ""
                             file_format = meta.get("file_format") or ""
 
@@ -397,6 +396,7 @@ def fetch_index_command(
             "event": "fetch_index",
             "n_portals": total_portals,
             "n_files_upserted": total_files,
+            "skipped_foreign_portal": skipped_foreign_portal,
             "cache_dir": str(paths.jgi_index_cache_dir),
             "cache_only": cache_only,
             "overwrite_cache": overwrite_cache,
