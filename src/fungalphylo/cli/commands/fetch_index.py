@@ -165,7 +165,7 @@ def fetch_index_command(
 
     tok = get_token(token)
 
-    # Determine portal list
+    # Determine portal list AND portal_set for FK safety
     conn = connect(paths.db_path)
     try:
         if portal_id:
@@ -176,6 +176,8 @@ def fetch_index_command(
             else:
                 rows = conn.execute("SELECT portal_id FROM portals ORDER BY portal_id").fetchall()
             portals = [r["portal_id"] for r in rows]
+
+        portal_set = {r["portal_id"] for r in conn.execute("SELECT portal_id FROM portals").fetchall()}
     finally:
         conn.close()
 
@@ -186,6 +188,7 @@ def fetch_index_command(
 
     total_files = 0
     total_portals = 0
+    skipped_foreign_portal = 0
     errors_log = paths.errors_log
     n_errors = 0
 
@@ -201,7 +204,7 @@ def fetch_index_command(
 
         for pid in portals:
             progress.update(task, portal=(pid[:PORTAL_WIDTH]).ljust(PORTAL_WIDTH))
-            inserted = 0  # always defined per portal
+            inserted = 0
             cache_path = paths.jgi_index_cache_dir / f"{pid}.json"
 
             try:
@@ -267,8 +270,6 @@ def fetch_index_command(
                 finally:
                     conn.close()
 
-                portal_set = {r["portal_id"] for r in conn.execute("SELECT portal_id FROM portals").fetchall()}
-
                 # Ingest portal_files
                 conn = connect(paths.db_path)
                 try:
@@ -292,8 +293,9 @@ def fetch_index_command(
 
                             meta = f.get("metadata") or {}
                             myco_pid = meta.get("mycocosm_portal_id") or f.get("portal_detail_id") or pid
-                            
-                            # ✅ guard: only insert file rows for portals that exist in portals table
+                            myco_pid = str(myco_pid).strip()
+
+                            # ✅ guard: only insert for portals we track (prevents FK failures)
                             if myco_pid not in portal_set:
                                 skipped_foreign_portal += 1
                                 continue
@@ -335,7 +337,7 @@ def fetch_index_command(
                                 """,
                                 (
                                     str(file_id),
-                                    str(myco_pid),
+                                    myco_pid,
                                     kind,
                                     file_name,
                                     int(file_size) if isinstance(file_size, int) else (int(file_size) if file_size else None),
@@ -405,4 +407,9 @@ def fetch_index_command(
         },
     )
 
-    typer.echo(f"Done. Portals processed: {total_portals}. File rows upserted: {total_files}. Errors: {n_errors}.")
+    typer.echo(
+        f"Done. Portals processed: {total_portals}. "
+        f"File rows upserted: {total_files}. "
+        f"Skipped foreign-portal rows: {skipped_foreign_portal}. "
+        f"Errors: {n_errors}."
+    )
