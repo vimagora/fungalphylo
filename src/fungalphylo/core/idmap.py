@@ -4,10 +4,18 @@ import csv
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Tuple
-
+from typing import Dict
 
 _CANON_RE = re.compile(r"^[A-Za-z0-9_.-]+\|\d+$")
+
+# Excel / common NA markers
+_NA_TOKENS = {"", "na", "n/a", "#n/d", "#na", "null", "none", "nan"}
+
+
+def _is_na(value: str | None) -> bool:
+    if value is None:
+        return True
+    return value.strip().lower() in _NA_TOKENS
 
 
 @dataclass(frozen=True)
@@ -62,8 +70,14 @@ def _read_per_portal_tsv(path: Path, portal_id: str) -> PortalIdMap:
                 model = (row.get("model_id") or "").strip()
                 tx = (row.get("transcript_id") or "").strip()
 
-                if not canon or not orig:
+                # require original_header always
+                if not orig:
                     continue
+
+                # NEW: NA canonical => drop this sequence mapping
+                if _is_na(canon):
+                    continue
+
                 if not _CANON_RE.match(canon):
                     raise ValueError(f"{path}: invalid canonical_protein_id: {canon!r}")
 
@@ -71,19 +85,21 @@ def _read_per_portal_tsv(path: Path, portal_id: str) -> PortalIdMap:
                     raise ValueError(f"{path}: conflicting mapping for original_header={orig!r}")
                 header_to_canon[orig] = canon
 
-                if model:
+                if model and not _is_na(model):
                     if model in model_to_canon and model_to_canon[model] != canon:
                         raise ValueError(f"{path}: conflicting mapping for model_id={model!r}")
                     model_to_canon[model] = canon
-                    if tx:
+
+                    if tx and not _is_na(tx):
                         model_to_transcript[model] = tx
 
             else:
                 # Format A
                 model = (row.get("model_id") or "").strip()
                 jgi = (row.get("jgi_protein_id") or "").strip()
-                if not model or not jgi:
+                if _is_na(model) or _is_na(jgi):
                     continue
+
                 canon = f"{portal_id}|{jgi}"
                 if model in model_to_canon and model_to_canon[model] != canon:
                     raise ValueError(f"{path}: conflicting mapping for model_id={model!r}")
@@ -100,23 +116,46 @@ def _read_per_portal_tsv(path: Path, portal_id: str) -> PortalIdMap:
     )
 
 
-def load_id_map(id_map_path: Path, portal_id: str) -> PortalIdMap:
+def load_id_map(id_map_path: Path, portal_id: str, kind: str = "proteome") -> PortalIdMap:
     """
     Load mapping for one portal.
 
     id_map_path may be:
-      - a directory containing <portal_id>.tsv
+      - a directory containing <portal_id>.<kind>.tsv (preferred) or <portal_id>.tsv (fallback)
       - a single TSV containing portal_id column plus either Format A or Format B columns
     """
     id_map_path = id_map_path.expanduser().resolve()
 
     if id_map_path.is_dir():
-        return _read_per_portal_tsv(id_map_path / f"{portal_id}.tsv", portal_id)
+        if kind not in {"proteome", "cds"}:
+            raise ValueError("kind must be 'proteome' or 'cds'")
+
+        if kind == "proteome":
+            candidates = [
+                id_map_path / f"{portal_id}.proteome.tsv",
+                id_map_path / f"{portal_id}.faa.tsv",
+                id_map_path / f"{portal_id}.tsv",
+            ]
+        else:
+            candidates = [
+                id_map_path / f"{portal_id}.cds.tsv",
+                id_map_path / f"{portal_id}.fna.tsv",
+                id_map_path / f"{portal_id}.tsv",
+            ]
+
+        for p in candidates:
+            if p.exists():
+                return _read_per_portal_tsv(p, portal_id)
+
+        raise FileNotFoundError(
+            f"ID map file not found for portal {portal_id} in {id_map_path}. Tried: "
+            + ", ".join(p.name for p in candidates)
+        )
 
     if not id_map_path.exists():
         raise FileNotFoundError(f"--id-map not found: {id_map_path}")
 
-    # Combined TSV. Filter rows by portal_id into a temp in-memory map.
+    # Combined TSV. Filter rows by portal_id into an in-memory map.
     header_to_canon: Dict[str, str] = {}
     model_to_canon: Dict[str, str] = {}
     model_to_transcript: Dict[str, str] = {}
@@ -130,9 +169,7 @@ def load_id_map(id_map_path: Path, portal_id: str) -> PortalIdMap:
         is_format_a = "model_id" in fields and "jgi_protein_id" in fields
 
         if not (is_format_a or is_format_b):
-            raise ValueError(
-                f"{id_map_path} must include portal_id and either Format A or Format B columns."
-            )
+            raise ValueError(f"{id_map_path} must include portal_id and either Format A or Format B columns.")
 
         for row in reader:
             pid = (row.get("portal_id") or "").strip()
@@ -144,8 +181,14 @@ def load_id_map(id_map_path: Path, portal_id: str) -> PortalIdMap:
                 orig = (row.get("original_header") or "").strip()
                 model = (row.get("model_id") or "").strip()
                 tx = (row.get("transcript_id") or "").strip()
-                if not canon or not orig:
+
+                if not orig:
                     continue
+
+                # NEW: NA canonical => drop mapping row
+                if _is_na(canon):
+                    continue
+
                 if not _CANON_RE.match(canon):
                     raise ValueError(f"{id_map_path}: invalid canonical_protein_id: {canon!r}")
 
@@ -153,16 +196,17 @@ def load_id_map(id_map_path: Path, portal_id: str) -> PortalIdMap:
                     raise ValueError(f"{id_map_path}: conflicting mapping for original_header={orig!r}")
                 header_to_canon[orig] = canon
 
-                if model:
+                if model and not _is_na(model):
                     if model in model_to_canon and model_to_canon[model] != canon:
                         raise ValueError(f"{id_map_path}: conflicting mapping for model_id={model!r}")
                     model_to_canon[model] = canon
-                    if tx:
+                    if tx and not _is_na(tx):
                         model_to_transcript[model] = tx
+
             else:
                 model = (row.get("model_id") or "").strip()
                 jgi = (row.get("jgi_protein_id") or "").strip()
-                if not model or not jgi:
+                if _is_na(model) or _is_na(jgi):
                     continue
                 canon = f"{portal_id}|{jgi}"
                 if model in model_to_canon and model_to_canon[model] != canon:
