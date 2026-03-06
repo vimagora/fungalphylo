@@ -267,6 +267,8 @@ def fetch_index_command(
                 finally:
                     conn.close()
 
+                portal_set = {r["portal_id"] for r in conn.execute("SELECT portal_id FROM portals").fetchall()}
+
                 # Ingest portal_files
                 conn = connect(paths.db_path)
                 try:
@@ -290,6 +292,13 @@ def fetch_index_command(
 
                             meta = f.get("metadata") or {}
                             myco_pid = meta.get("mycocosm_portal_id") or f.get("portal_detail_id") or pid
+
+                            # ✅ guard: only insert file rows for portals that exist in portals table
+                            if myco_pid not in portal_set:
+                                myco_pid = pid
+                                # skipped_foreign_portal += 1
+                                # continue
+                            
                             jat_label = meta.get("jat_label") or ""
                             file_format = meta.get("file_format") or ""
 
