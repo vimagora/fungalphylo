@@ -222,3 +222,43 @@ def load_id_map(id_map_path: Path, portal_id: str, kind: str = "proteome") -> Po
         model_to_canon=model_to_canon,
         model_to_transcript=model_to_transcript,
     )
+
+
+def resolve_id_map_file(id_map_path: Path, portal_id: str, kind: str = "proteome") -> Path:
+    """
+    Resolve the concrete TSV file that will be used for one portal/kind.
+
+    This is used for hashing the exact mapping input that participated in staging.
+    """
+    id_map_path = id_map_path.expanduser().resolve()
+
+    if id_map_path.is_dir():
+        if kind not in {"proteome", "cds"}:
+            raise ValueError("kind must be 'proteome' or 'cds'")
+
+        if kind == "proteome":
+            candidates = [
+                id_map_path / f"{portal_id}.proteome.tsv",
+                id_map_path / f"{portal_id}.faa.tsv",
+                id_map_path / f"{portal_id}.tsv",
+            ]
+        else:
+            candidates = [
+                id_map_path / f"{portal_id}.cds.tsv",
+                id_map_path / f"{portal_id}.fna.tsv",
+                id_map_path / f"{portal_id}.tsv",
+            ]
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+        raise FileNotFoundError(
+            f"ID map file not found for portal {portal_id} in {id_map_path}. Tried: "
+            + ", ".join(p.name for p in candidates)
+        )
+
+    if not id_map_path.exists():
+        raise FileNotFoundError(f"--id-map not found: {id_map_path}")
+
+    return id_map_path

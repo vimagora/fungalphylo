@@ -162,8 +162,9 @@ def fetch_index_command(
     project_dir = project_dir.expanduser().resolve()
     paths = ProjectPaths(project_dir)
     ensure_project_dirs(paths)
-
-    tok = get_token(token)
+    tok: Optional[str] = None
+    if not ingest_from_cache:
+        tok = get_token(token)
 
     # Determine portal list AND portal_set for FK safety
     conn = connect(paths.db_path)
@@ -226,6 +227,7 @@ def fetch_index_command(
                     page = 1
                     merged_payload = {"pages": [], "portal_id": pid, "fetched_at": _now()}
                     while True:
+                        assert tok is not None
                         payload = fetch_search_json(pid, tok, page=page, page_size=page_size)
                         merged_payload["pages"].append(payload)
                         if not payload.get("next_page", False):

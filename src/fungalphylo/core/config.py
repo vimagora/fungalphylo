@@ -25,14 +25,23 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Autoselect explainability
     "autoselect": {
         "top_n": 5,
-        # Keep this flexible; we’ll define scoring later in the autoselect module.
         "weights": {
-            "label_priority": 10.0,
-            "status_priority": 5.0,
-            "newer_modified": 1.0,
-            "larger_size": 0.5,
+            "data_group_genome": 50.0,
+            "file_format_fasta": 20.0,
+            "status_restored": 10.0,
+            "status_purged_penalty": -2.0,
+            "proteome_label_filtered": 100.0,
+            "proteome_label_all": 60.0,
+            "proteome_label_generic": 30.0,
+            "cds_label_filtered": 100.0,
+            "cds_label_all": 60.0,
+            "transcript_filtered_fallback": 50.0,
+            "transcript_generic_fallback": 20.0,
+            "has_date_bonus": 1.0,
+            "size_gb_bonus": 1.0,
+            "size_bonus_cap": 5.0,
         },
-        "ban_patterns": [],
+        "ban_patterns": ["deflines", "promoter", "alleles"],
     },
     # Compute defaults (placeholders for later)
     "compute": {

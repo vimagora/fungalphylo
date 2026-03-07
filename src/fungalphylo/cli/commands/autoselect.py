@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import typer
 
@@ -15,6 +15,38 @@ from fungalphylo.core.paths import ProjectPaths
 from fungalphylo.db.db import connect
 
 app = typer.Typer(help="Automatically select best proteome/CDS per portal (explainable).")
+
+DEFAULT_BAD_PATTERNS = ("deflines", "promoter", "alleles")
+DEFAULT_SCORE_WEIGHTS: Dict[str, float] = {
+    "data_group_genome": 50.0,
+    "file_format_fasta": 20.0,
+    "status_restored": 10.0,
+    "status_purged_penalty": -2.0,
+    "proteome_label_filtered": 100.0,
+    "proteome_label_all": 60.0,
+    "proteome_label_generic": 30.0,
+    "cds_label_filtered": 100.0,
+    "cds_label_all": 60.0,
+    "transcript_filtered_fallback": 50.0,
+    "transcript_generic_fallback": 20.0,
+    "has_date_bonus": 1.0,
+    "size_gb_bonus": 1.0,
+    "size_bonus_cap": 5.0,
+}
+LEGACY_WEIGHT_ALIASES = {
+    "label_priority": (
+        "proteome_label_filtered",
+        "proteome_label_all",
+        "proteome_label_generic",
+        "cds_label_filtered",
+        "cds_label_all",
+        "transcript_filtered_fallback",
+        "transcript_generic_fallback",
+    ),
+    "status_priority": ("status_restored", "status_purged_penalty"),
+    "newer_modified": ("has_date_bonus",),
+    "larger_size": ("size_gb_bonus", "size_bonus_cap"),
+}
 
 
 def _now_tag() -> str:
@@ -45,10 +77,47 @@ def _meta(row) -> Dict[str, Any]:
         return {}
 
 
-def _contains_bad_keyword(filename: str) -> bool:
+def _contains_bad_keyword(filename: str, ban_patterns: Optional[List[str]] = None) -> bool:
     s = (filename or "").lower()
-    bad = ["deflines", "promoter", "alleles"]
+    bad = [p.lower() for p in (ban_patterns or list(DEFAULT_BAD_PATTERNS)) if p]
     return any(b in s for b in bad)
+
+
+def resolve_autoselect_weights(cfg: Mapping[str, Any]) -> Dict[str, float]:
+    raw_weights = cfg.get("autoselect", {}).get("weights", {})
+    resolved = dict(DEFAULT_SCORE_WEIGHTS)
+
+    if isinstance(raw_weights, Mapping):
+        for key, value in raw_weights.items():
+            if key in resolved:
+                resolved[key] = float(value)
+
+        for legacy_key, mapped_keys in LEGACY_WEIGHT_ALIASES.items():
+            if legacy_key not in raw_weights:
+                continue
+            legacy_value = float(raw_weights[legacy_key])
+            if legacy_key == "status_priority":
+                resolved["status_restored"] = legacy_value
+                resolved["status_purged_penalty"] = -abs(legacy_value) / 2.5
+            elif legacy_key == "larger_size":
+                resolved["size_gb_bonus"] = legacy_value
+                resolved["size_bonus_cap"] = max(resolved["size_bonus_cap"], legacy_value)
+            else:
+                for mapped_key in mapped_keys:
+                    if mapped_key in DEFAULT_SCORE_WEIGHTS:
+                        scale = DEFAULT_SCORE_WEIGHTS[mapped_key] / max(DEFAULT_SCORE_WEIGHTS[mapped_keys[0]], 1.0)
+                        resolved[mapped_key] = legacy_value * scale
+
+    return resolved
+
+
+def resolve_ban_patterns(cfg: Mapping[str, Any]) -> List[str]:
+    patterns = cfg.get("autoselect", {}).get("ban_patterns", [])
+    if not isinstance(patterns, list):
+        return list(DEFAULT_BAD_PATTERNS)
+    merged = [p for p in DEFAULT_BAD_PATTERNS]
+    merged.extend(str(p) for p in patterns if str(p).strip())
+    return merged
 
 
 @dataclass
@@ -92,11 +161,21 @@ def row_to_candidate(r) -> Candidate:
     )
 
 
-def score_candidate(c: Candidate, target: str) -> Tuple[float, Dict[str, Any]]:
+def score_candidate(
+    c: Candidate,
+    target: str,
+    *,
+    weights: Optional[Mapping[str, float]] = None,
+    ban_patterns: Optional[List[str]] = None,
+) -> Tuple[float, Dict[str, Any]]:
     """
     target: "proteome" or "cds"
     Returns (score, breakdown dict)
     """
+    score_weights = dict(DEFAULT_SCORE_WEIGHTS)
+    if weights:
+        score_weights.update({k: float(v) for k, v in weights.items()})
+
     score = 0.0
     why: Dict[str, Any] = {}
 
@@ -104,77 +183,85 @@ def score_candidate(c: Candidate, target: str) -> Tuple[float, Dict[str, Any]]:
     hard_reasons = []
     if c.kind.lower() == "gff":
         hard_reasons.append("kind=gff")
-    if _contains_bad_keyword(c.filename):
+    if _contains_bad_keyword(c.filename, ban_patterns=ban_patterns):
         hard_reasons.append("bad_keyword")
     if hard_reasons:
         return -1e9, {"hard_exclude": "|".join(hard_reasons)}
 
     # Prefer genome data group
     if c.data_group.lower() == "genome":
-        score += 50
-        why["data_group_genome"] = 50
+        score += score_weights["data_group_genome"]
+        why["data_group_genome"] = score_weights["data_group_genome"]
 
     # Prefer fasta format
     if c.file_format.lower() == "fasta":
-        score += 20
-        why["file_format_fasta"] = 20
+        score += score_weights["file_format_fasta"]
+        why["file_format_fasta"] = score_weights["file_format_fasta"]
 
     # Prefer status restored (vs purged)
     # (Keep purged candidates for later restore/download step)
     if c.file_status.upper() == "RESTORED":
-        score += 10
-        why["status_restored"] = 10
+        score += score_weights["status_restored"]
+        why["status_restored"] = score_weights["status_restored"]
     elif c.file_status.upper() == "PURGED":
-        score -= 2
-        why["status_purged_penalty"] = -2
+        score += score_weights["status_purged_penalty"]
+        why["status_purged_penalty"] = score_weights["status_purged_penalty"]
 
     # Label preference by target
     jat = c.jat_label.lower()
     if target == "proteome":
         if "proteins_filtered" in jat:
-            score += 100
-            why["jat_proteins_filtered"] = 100
+            score += score_weights["proteome_label_filtered"]
+            why["jat_proteins_filtered"] = score_weights["proteome_label_filtered"]
         elif "proteins_all" in jat:
-            score += 60
-            why["jat_proteins_all"] = 60
+            score += score_weights["proteome_label_all"]
+            why["jat_proteins_all"] = score_weights["proteome_label_all"]
         elif "protein" in jat:
-            score += 30
-            why["jat_protein_generic"] = 30
+            score += score_weights["proteome_label_generic"]
+            why["jat_protein_generic"] = score_weights["proteome_label_generic"]
     else:
         if "cds_filtered" in jat:
-            score += 100
-            why["jat_cds_filtered"] = 100
+            score += score_weights["cds_label_filtered"]
+            why["jat_cds_filtered"] = score_weights["cds_label_filtered"]
         elif "cds_all" in jat:
-            score += 60
-            why["jat_cds_all"] = 60
+            score += score_weights["cds_label_all"]
+            why["jat_cds_all"] = score_weights["cds_label_all"]
         elif "transcripts_filtered" in jat or "transcript_filtered" in jat:
-            score += 50
-            why["jat_transcripts_filtered_fallback"] = 50
+            score += score_weights["transcript_filtered_fallback"]
+            why["jat_transcripts_filtered_fallback"] = score_weights["transcript_filtered_fallback"]
         elif "transcript" in jat:
-            score += 20
-            why["jat_transcript_generic"] = 20
+            score += score_weights["transcript_generic_fallback"]
+            why["jat_transcript_generic"] = score_weights["transcript_generic_fallback"]
 
     # Prefer newer files
     ts = c.newest_ts()
     if ts:
         # Convert to an increasing bonus; don't over-weight absolute dates
         # Bonus bucket by recency relative to others is handled by sorting later, but we add a small bump.
-        score += 1
-        why["has_date_bonus"] = 1
+        score += score_weights["has_date_bonus"]
+        why["has_date_bonus"] = score_weights["has_date_bonus"]
 
     # Prefer larger (weakly) as a tie-breaker
     if c.size_bytes:
-        score += min(5.0, c.size_bytes / 1e9)  # cap at +5
-        why["size_tiebreak"] = round(min(5.0, c.size_bytes / 1e9), 4)
+        size_bonus = min(score_weights["size_bonus_cap"], (c.size_bytes / 1e9) * score_weights["size_gb_bonus"])
+        score += size_bonus
+        why["size_tiebreak"] = round(size_bonus, 4)
 
     why["final_score"] = score
     return score, why
 
 
-def top_n_sorted(cands: List[Candidate], target: str, n: int) -> List[Tuple[Candidate, float, Dict[str, Any]]]:
+def top_n_sorted(
+    cands: List[Candidate],
+    target: str,
+    n: int,
+    *,
+    weights: Optional[Mapping[str, float]] = None,
+    ban_patterns: Optional[List[str]] = None,
+) -> List[Tuple[Candidate, float, Dict[str, Any]]]:
     scored = []
     for c in cands:
-        s, why = score_candidate(c, target)
+        s, why = score_candidate(c, target, weights=weights, ban_patterns=ban_patterns)
         scored.append((c, s, why))
 
     # sort: score desc, date desc, size desc, filename asc
@@ -206,6 +293,8 @@ def autoselect_command(
     paths = ProjectPaths(project_dir)
 
     cfg = resolve_config(project_config=load_yaml(paths.config_yaml))
+    score_weights = resolve_autoselect_weights(cfg)
+    ban_patterns = resolve_ban_patterns(cfg)
 
     review_dir = project_dir / "review"
     review_dir.mkdir(parents=True, exist_ok=True)
@@ -267,8 +356,8 @@ def autoselect_command(
             cands = by_portal.get(pid, [])
             # filter out obvious wrong-kinds early, but keep "other" because some datasets mislabel kind
             # (scoring handles gff exclusion)
-            top_prot = top_n_sorted(cands, "proteome", top_n)
-            top_cds = top_n_sorted(cands, "cds", top_n)
+            top_prot = top_n_sorted(cands, "proteome", top_n, weights=score_weights, ban_patterns=ban_patterns)
+            top_cds = top_n_sorted(cands, "cds", top_n, weights=score_weights, ban_patterns=ban_patterns)
 
             # Choose top scoring candidate with score > -1e8 (not hard excluded)
             best_prot = next((t for t in top_prot if t[1] > -1e8), None)
@@ -319,6 +408,8 @@ def autoselect_command(
             "out_selection_tsv": str(out_sel),
             "out_explain_tsv": str(out_explain),
             "top_n": top_n,
+            "ban_patterns": ban_patterns,
+            "weights": score_weights,
         },
     )
 

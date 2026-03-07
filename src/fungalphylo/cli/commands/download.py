@@ -27,7 +27,7 @@ from fungalphylo.core.errors import exception_record, log_error_jsonl
 from fungalphylo.core.events import log_event
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.core.resolve import resolve_raw_path
-from fungalphylo.db.db import connect
+from fungalphylo.db.db import connect, init_db
 
 app = typer.Typer(help="Download approved (restored) JGI files into raw/ cache (processing happens in stage).")
 
@@ -274,6 +274,7 @@ def move_files_using_manifest(
     moved = 0
     missing = 0
 
+    unmatched_path.parent.mkdir(parents=True, exist_ok=True)
     with unmatched_path.open("w", encoding="utf-8", newline="") as uf:
         w = csv.writer(uf, delimiter="\t")
         w.writerow(["portal_id", "file_id", "filename", "expected_source_path", "reason"])
@@ -297,8 +298,6 @@ def move_files_using_manifest(
             except Exception as ex:
                 missing += 1
                 w.writerow([e.portal_id, e.file_id, e.filename, str(src), f"move_failed:{type(ex).__name__}"])
-
-    keep_manifest_to.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(manifest_csv, keep_manifest_to)
 
     return moved, missing, unmatched_path
@@ -313,7 +312,11 @@ def download_command(
     max_chars: int = typer.Option(3500, "--max-chars", help="Max JSON character length per download request."),
     timeout: int = typer.Option(300, "--timeout", help="HTTP timeout seconds per request."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Build payloads but do not download."),
-    overwrite_staged: bool = typer.Option(False, "--overwrite-staged", help="If already staged, download again."),
+    overwrite_staged: bool = typer.Option(
+        False,
+        "--overwrite-staged",
+        help="If the approved file already exists in any staging snapshot, download again anyway.",
+    ),
     skip_if_raw_present: bool = typer.Option(
         False,
         "--skip-if-raw-present",
@@ -332,17 +335,23 @@ def download_command(
     project_dir = project_dir.expanduser().resolve()
     paths = ProjectPaths(project_dir)
     ensure_project_dirs(paths)
+    init_db(paths.db_path)
 
     cfg = resolve_config(project_config=load_yaml(paths.config_yaml))
     raw_layout = cfg["staging"]["raw_layout"]
 
-    tok = get_token(token)
+    tok: Optional[str] = None if dry_run else get_token(token)
     errors_log = paths.errors_log
 
     # staged map
     conn = connect(paths.db_path)
     try:
-        staged = conn.execute("SELECT portal_id, kind, file_id FROM staged_files").fetchall()
+        staged = conn.execute(
+            """
+            SELECT DISTINCT portal_id, kind, source_file_id AS file_id
+            FROM staging_files
+            """
+        ).fetchall()
     finally:
         conn.close()
     staged_map = {(r["portal_id"], r["kind"]): r["file_id"] for r in staged}
@@ -393,7 +402,7 @@ def download_command(
             cds_id = r["cds_file_id"]
             cds_fn = r["cds_filename"]
 
-            # skip if staged with same file_id
+            # skip if the approved file already exists in any staging snapshot
             if not overwrite_staged:
                 if staged_map.get((pid, "proteome")) == prot_id:
                     prot_id = None
@@ -444,13 +453,14 @@ def download_command(
         conn.close()
 
     if not norm_rows:
-        typer.echo("Nothing to download (already staged and/or raw files already present).")
+        typer.echo("Nothing to download (already present in staging snapshot(s) and/or raw cache).")
         return
 
     blocks = build_blocks(norm_rows)
     payloads = chunk_payloads(blocks, max_chars=max_chars)
 
-    out_dir = project_dir / "download_requests" / _now_tag()
+    request_id = _now_tag()
+    out_dir = project_dir / "download_requests" / request_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for i, payload in enumerate(payloads, start=1):
@@ -459,6 +469,40 @@ def download_command(
         )
 
     typer.echo(f"Wrote {len(payloads)} download payload(s) to: {out_dir}")
+    conn = connect(paths.db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO download_requests(
+              request_id, created_at, request_dir, dry_run, status,
+              n_payloads, n_payload_ok, n_errors, moved_files, missing_files,
+              max_chars, timeout_seconds, continue_on_error, skip_if_raw_present,
+              overwrite_staged, retain
+            )
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                request_id,
+                _now_iso(),
+                str(out_dir.relative_to(project_dir)),
+                1 if dry_run else 0,
+                "planned" if dry_run else "running",
+                len(payloads),
+                0,
+                0,
+                0,
+                0,
+                max_chars,
+                timeout,
+                1 if continue_on_error else 0,
+                1 if skip_if_raw_present else 0,
+                1 if overwrite_staged else 0,
+                retain,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
     if dry_run:
         typer.echo("Dry-run complete (no downloads).")
         log_event(
@@ -498,6 +542,7 @@ def download_command(
         for i, payload in enumerate(payloads, start=1):
             progress.update(task, payload=f"{i:03d}/{len(payloads):03d}".ljust(10))
             try:
+                assert tok is not None
                 resp = post_download(payload, tok, timeout=timeout)
 
                 zip_name = f"bundle_{i:03d}.zip"
@@ -609,6 +654,21 @@ def download_command(
             "overwrite_staged": overwrite_staged,
         },
     )
+
+    final_status = "completed" if n_errors == 0 else ("partial" if n_payload_ok > 0 else "failed")
+    conn = connect(paths.db_path)
+    try:
+        conn.execute(
+            """
+            UPDATE download_requests
+            SET status=?, n_payload_ok=?, n_errors=?, moved_files=?, missing_files=?
+            WHERE request_id=?
+            """,
+            (final_status, n_payload_ok, n_errors, moved_total, missing_total, request_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
     typer.echo(f"Done. Payloads OK: {n_payload_ok}/{len(payloads)}. Errors: {n_errors}.")
     typer.echo(f"Moved into raw/: {moved_total}. Missing/unmoved entries: {missing_total}.")

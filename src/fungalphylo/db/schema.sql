@@ -69,16 +69,68 @@ CREATE TABLE IF NOT EXISTS runs (
   FOREIGN KEY (staging_id) REFERENCES stagings(staging_id)
 );
 
--- Staged files for a portal and kind (current best effort for what should be used in runs; can be updated until staging is finalized)
-CREATE TABLE IF NOT EXISTS staged_files (
-  portal_id      TEXT NOT NULL,
-  kind           TEXT NOT NULL, -- 'proteome' or 'cds'
-  file_id        TEXT NOT NULL, -- source portal_files.file_id
-  raw_sha256     TEXT NOT NULL,
-  staged_path    TEXT NOT NULL,
-  staged_sha256  TEXT NOT NULL,
-  created_at     TEXT NOT NULL,
-  params_json    TEXT,
-  PRIMARY KEY (portal_id, kind),
-  FOREIGN KEY (portal_id) REFERENCES portals(portal_id) ON DELETE CASCADE
+-- Legacy mutable staging table removed in favor of snapshot-scoped staging_files.
+DROP TABLE IF EXISTS staged_files;
+
+-- Snapshot-scoped staged artifacts. Multiple snapshots may reference equivalent
+-- artifacts via identical cache keys, but each snapshot gets its own immutable
+-- artifact path under staging/<staging_id>/...
+CREATE TABLE IF NOT EXISTS staging_files (
+  staging_id            TEXT NOT NULL,
+  portal_id             TEXT NOT NULL,
+  kind                  TEXT NOT NULL, -- 'proteome' or 'cds'
+  source_file_id        TEXT NOT NULL, -- source portal_files.file_id
+  raw_sha256            TEXT NOT NULL,
+  artifact_path         TEXT NOT NULL,
+  artifact_sha256       TEXT NOT NULL,
+  artifact_cache_key    TEXT NOT NULL,
+  reused_from_staging_id TEXT,
+  created_at            TEXT NOT NULL,
+  params_json           TEXT,
+  PRIMARY KEY (staging_id, portal_id, kind),
+  FOREIGN KEY (staging_id) REFERENCES stagings(staging_id) ON DELETE CASCADE,
+  FOREIGN KEY (portal_id) REFERENCES portals(portal_id) ON DELETE CASCADE,
+  FOREIGN KEY (source_file_id) REFERENCES portal_files(file_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_staging_files_cache_key
+  ON staging_files(kind, artifact_cache_key);
+
+CREATE TABLE IF NOT EXISTS restore_requests (
+  request_id         TEXT PRIMARY KEY,
+  created_at         TEXT NOT NULL,
+  request_dir        TEXT NOT NULL,
+  dry_run            INTEGER NOT NULL DEFAULT 0,
+  status             TEXT NOT NULL,
+  n_payloads         INTEGER NOT NULL DEFAULT 0,
+  n_posted           INTEGER NOT NULL DEFAULT 0,
+  n_errors           INTEGER NOT NULL DEFAULT 0,
+  send_mail          INTEGER NOT NULL DEFAULT 1,
+  max_chars          INTEGER NOT NULL,
+  continue_on_error  INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_restore_requests_created_at
+  ON restore_requests(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS download_requests (
+  request_id            TEXT PRIMARY KEY,
+  created_at            TEXT NOT NULL,
+  request_dir           TEXT NOT NULL,
+  dry_run               INTEGER NOT NULL DEFAULT 0,
+  status                TEXT NOT NULL,
+  n_payloads            INTEGER NOT NULL DEFAULT 0,
+  n_payload_ok          INTEGER NOT NULL DEFAULT 0,
+  n_errors              INTEGER NOT NULL DEFAULT 0,
+  moved_files           INTEGER NOT NULL DEFAULT 0,
+  missing_files         INTEGER NOT NULL DEFAULT 0,
+  max_chars             INTEGER NOT NULL,
+  timeout_seconds       INTEGER NOT NULL,
+  continue_on_error     INTEGER NOT NULL DEFAULT 1,
+  skip_if_raw_present   INTEGER NOT NULL DEFAULT 0,
+  overwrite_staged      INTEGER NOT NULL DEFAULT 0,
+  retain                TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_download_requests_created_at
+  ON download_requests(created_at DESC);

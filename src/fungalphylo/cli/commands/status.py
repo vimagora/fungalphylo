@@ -12,7 +12,7 @@ from rich.table import Table as RichTable
 from fungalphylo.core.config import load_yaml, resolve_config
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.core.resolve import resolve_raw_path
-from fungalphylo.db.db import connect
+from fungalphylo.db.db import connect, init_db
 
 app = typer.Typer(help="Show project status: portals, approvals, raw cache, restore/download batches, staging snapshots.")
 
@@ -60,6 +60,7 @@ def status_command(
     project_dir = project_dir.expanduser().resolve()
     paths = ProjectPaths(project_dir)
     ensure_project_dirs(paths)
+    init_db(paths.db_path)
 
     # Load config (for raw_layout)
     cfg = resolve_config(project_config=load_yaml(paths.config_yaml))
@@ -78,6 +79,22 @@ def status_command(
         stagings_n = conn.execute("SELECT COUNT(*) AS n FROM stagings").fetchone()["n"]
         latest_staging = conn.execute(
             "SELECT staging_id, created_at, manifest_path FROM stagings ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        latest_restore_row = conn.execute(
+            """
+            SELECT request_id, created_at, request_dir, dry_run, status, n_payloads, n_posted, n_errors
+            FROM restore_requests
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        latest_download_row = conn.execute(
+            """
+            SELECT request_id, created_at, request_dir, dry_run, status, n_payloads, n_payload_ok, n_errors, moved_files, missing_files
+            FROM download_requests
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
         ).fetchone()
 
         # For raw cache completeness: approvals joined with portal_files to get filenames
@@ -133,22 +150,24 @@ def status_command(
                 if len(missing_samples) < sample_missing:
                     missing_samples.append(f"{pid}\tcds\t{cds_raw}")
 
-    # Find latest restore/download batches
-    restore_root = project_dir / "restore_requests"
-    download_root = project_dir / "download_requests"
-    latest_restore = _latest_subdir(restore_root)
-    latest_download = _latest_subdir(download_root)
+    def ledger_batch_summary(row, kind: str) -> Dict[str, str]:
+        if row is None:
+            return {"dir": "-", "status": "-", "payloads": "0", "result": "-"}
+        request_dir = project_dir / row["request_dir"]
+        status = row["status"]
+        if row["dry_run"]:
+            status = f"{status} (dry-run)"
+        if kind == "restore":
+            result = f"posted={row['n_posted']} errors={row['n_errors']}"
+        else:
+            result = (
+                f"ok={row['n_payload_ok']} errors={row['n_errors']} "
+                f"moved={row['moved_files']} missing={row['missing_files']}"
+            )
+        return {"dir": str(request_dir), "status": status, "payloads": str(row["n_payloads"]), "result": result}
 
-    # Summaries for latest batches
-    def batch_summary(batch_dir: Optional[Path]) -> Dict[str, str]:
-        if not batch_dir:
-            return {"dir": "-", "payloads": "0", "responses": "0"}
-        payloads = len(list(batch_dir.glob("payload_*.json")))
-        responses = 1 if (batch_dir / "responses.jsonl").exists() else 0
-        return {"dir": str(batch_dir), "payloads": str(payloads), "responses": str(responses)}
-
-    restore_info = batch_summary(latest_restore)
-    download_info = batch_summary(latest_download)
+    restore_info = ledger_batch_summary(latest_restore_row, "restore")
+    download_info = ledger_batch_summary(latest_download_row, "download")
 
     # Render
     console.print(f"[bold]Project:[/bold] {project_dir}")
@@ -181,10 +200,11 @@ def status_command(
     t3 = RichTable(title="Latest restore/download batches", show_lines=False)
     t3.add_column("Type", style="bold")
     t3.add_column("Dir")
+    t3.add_column("Status")
     t3.add_column("# payloads", justify="right")
-    t3.add_column("responses.jsonl", justify="right")
-    t3.add_row("restore", restore_info["dir"], restore_info["payloads"], restore_info["responses"])
-    t3.add_row("download", download_info["dir"], download_info["payloads"], download_info["responses"])
+    t3.add_column("Result")
+    t3.add_row("restore", restore_info["dir"], restore_info["status"], restore_info["payloads"], restore_info["result"])
+    t3.add_row("download", download_info["dir"], download_info["status"], download_info["payloads"], download_info["result"])
     console.print(t3)
     console.print()
 
@@ -193,5 +213,8 @@ def status_command(
         console.print(f"  id: {latest_staging['staging_id']}")
         console.print(f"  created_at: {latest_staging['created_at']}")
         console.print(f"  manifest: {project_dir / latest_staging['manifest_path']}")
+        console.print(f"  proteomes: {paths.staging_proteomes_dir(latest_staging['staging_id'])}")
+        console.print(f"  cds: {paths.staging_cds_dir(latest_staging['staging_id'])}")
+        console.print(f"  checksums: {paths.staging_checksums(latest_staging['staging_id'])}")
     else:
         console.print("[bold]Latest staging:[/bold] -")

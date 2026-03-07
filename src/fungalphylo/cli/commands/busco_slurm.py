@@ -11,8 +11,9 @@ import typer
 from fungalphylo.core.events import log_event
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.core.tools import load_tools
+from fungalphylo.db.db import connect, init_db
 
-app = typer.Typer(help="Generate (and optionally submit) a SLURM job for BUSCO on staged proteomes (directory mode).")
+app = typer.Typer(help="Generate (and optionally submit) a SLURM job for BUSCO on a staging snapshot.")
 
 _SCRATCH_ACCOUNT_RE = re.compile(r"^/scratch/([^/]+)/")
 
@@ -31,10 +32,30 @@ def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
 
+def resolve_staging_id(project_dir: Path, explicit: Optional[str]) -> str:
+    if explicit:
+        return explicit
+
+    paths = ProjectPaths(project_dir)
+    init_db(paths.db_path)
+    conn = connect(paths.db_path)
+    try:
+        row = conn.execute(
+            "SELECT staging_id FROM stagings ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row is None:
+        raise typer.BadParameter("No staging snapshot found. Run `fungalphylo stage` first or pass --staging-id.")
+    return row["staging_id"]
+
+
 @app.callback(invoke_without_command=True)
 def busco_slurm_command(
     ctx: typer.Context,
     project_dir: Path = typer.Argument(..., help="Project directory (typically under /scratch/<account>/...)"),
+    staging_id: Optional[str] = typer.Option(None, "--staging-id", help="Staging snapshot to use (default: latest)."),
     lineage: str = typer.Option("fungi_odb12", "--lineage", help="BUSCO lineage dataset name, e.g. fungi_odb12"),
     time: str = typer.Option("24:00:00", "--time", help="SLURM time limit, e.g. 24:00:00"),
     cpus: int = typer.Option(8, "--cpus", help="CPUs per task"),
@@ -55,11 +76,12 @@ def busco_slurm_command(
     project_dir = project_dir.expanduser().resolve()
     paths = ProjectPaths(project_dir)
     ensure_project_dirs(paths)
+    selected_staging_id = resolve_staging_id(project_dir, staging_id)
 
     # Validate staged input exists
-    staged_proteomes = project_dir / "staged" / "proteomes"
+    staged_proteomes = paths.staging_proteomes_dir(selected_staging_id)
     if not staged_proteomes.exists():
-        raise typer.BadParameter(f"Missing staged proteomes dir: {staged_proteomes}")
+        raise typer.BadParameter(f"Missing staged proteomes dir for {selected_staging_id}: {staged_proteomes}")
 
     # Determine account
     inferred = infer_account_from_project_dir(project_dir)
@@ -103,7 +125,7 @@ def busco_slurm_command(
     ensure_dir(logs_dir)
 
     script_path = slurm_dir / "busco.sbatch"
-    run_name = f"busco_staged_{rid}"
+    run_name = f"busco_{selected_staging_id}_{rid}"
     busco_force_flag = "-f" if force else ""
 
     script = f"""#!/bin/bash
@@ -119,6 +141,7 @@ def busco_slurm_command(
 set -euo pipefail
 
 PROJECT_DIR="{project_dir.as_posix()}"
+STAGING_ID="{selected_staging_id}"
 SEQ_DIR="{staged_proteomes.as_posix()}"
 OUT_DIR="{out_dir.as_posix()}"
 DB_DIR="{db_dir.as_posix()}"
@@ -144,6 +167,7 @@ if ls "$OUT_DIR"/short_summary*.txt >/dev/null 2>&1; then
 fi
 
 echo "Running BUSCO directory mode"
+echo "Staging ID: $STAGING_ID"
 echo "Input dir: $SEQ_DIR"
 echo "Output dir: $OUT_DIR"
 echo "Lineage: $LINEAGE"
@@ -170,6 +194,7 @@ echo "Done."
             "ts": datetime.now(timezone.utc).isoformat(),
             "event": "slurm_busco_write",
             "run_id": rid,
+            "staging_id": selected_staging_id,
             "script_path": str(script_path),
             "account": acct,
             "partition": partition,
@@ -195,6 +220,7 @@ echo "Done."
                     "ts": datetime.now(timezone.utc).isoformat(),
                     "event": "slurm_busco_submit",
                     "run_id": rid,
+                    "staging_id": selected_staging_id,
                     "script_path": str(script_path),
                     "sbatch_stdout": res.stdout.strip(),
                 },

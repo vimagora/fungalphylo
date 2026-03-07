@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from rich.text import Text 
 from rich.progress import (
     Progress,
     BarColumn,
@@ -20,7 +19,7 @@ import typer
 
 from fungalphylo.core.events import log_event
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
-from fungalphylo.db.db import connect
+from fungalphylo.db.db import connect, init_db
 from fungalphylo.core.errors import log_error_jsonl, exception_record
 
 app = typer.Typer(help="Request that approved JGI files be restored from archive to disk (separate from download).")
@@ -198,8 +197,9 @@ def restore_command(
     project_dir = project_dir.expanduser().resolve()
     paths = ProjectPaths(project_dir)
     ensure_project_dirs(paths)
+    init_db(paths.db_path)
 
-    tok = get_token(token)
+    tok: Optional[str] = None if dry_run else get_token(token)
 
     # Fetch approvals + needed portal metadata
     conn = connect(paths.db_path)
@@ -255,16 +255,46 @@ def restore_command(
     payloads = chunk_restore_payloads(blocks, send_mail=send_mail, max_chars=max_chars)
 
     # Write payloads + responses
-    out_dir = project_dir / "restore_requests" / _now_tag()
+    request_id = _now_tag()
+    out_dir = project_dir / "restore_requests" / request_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for i, payload in enumerate(payloads, start=1):
         (out_dir / f"payload_{i:03d}.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     typer.echo(f"Wrote {len(payloads)} restore payload(s) to: {out_dir}")
+    conn = connect(paths.db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO restore_requests(
+              request_id, created_at, request_dir, dry_run, status,
+              n_payloads, n_posted, n_errors, send_mail, max_chars, continue_on_error
+            )
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                request_id,
+                _now_iso(),
+                str(out_dir.relative_to(project_dir)),
+                1 if dry_run else 0,
+                "planned" if dry_run else "running",
+                len(payloads),
+                0,
+                0,
+                1 if send_mail else 0,
+                max_chars,
+                1 if continue_on_error else 0,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
     responses_path = out_dir / "responses.jsonl"
     n_posted = 0
+
+    n_errors = 0
 
     if not dry_run:
         with responses_path.open("w", encoding="utf-8") as rf:
@@ -280,8 +310,6 @@ def restore_command(
                 task = progress.add_task("Downloading", total=len(payloads), payload="-" * 10)
 
                 errors_log = paths.errors_log
-                n_errors = 0
-
                 for i, payload in enumerate(payloads, start=1):
                     progress.update(task, payload=f"{i:03d}/{len(payloads):03d}".ljust(10))
                     
@@ -289,6 +317,7 @@ def restore_command(
                         stats = payload_stats(payload)
                         payload_len = len(compact_json(payload))
 
+                        assert tok is not None
                         resp = post_restore(payload, tok)
 
                         rf.write(json.dumps({
@@ -325,21 +354,18 @@ def restore_command(
                         if not continue_on_error:
                             raise
 
-                    except requests.HTTPError as e:
+                    except Exception as e:
                         n_errors += 1
-                        resp = getattr(e, "response", None)
                         log_error_jsonl(errors_log, {
                             "event": "restore_error",
                             "i": i,
                             "payload_path": str(out_dir / f"payload_{i:03d}.json"),
                             "payload_len": len(compact_json(payload)),
                             **payload_stats(payload),
-                            "stage": "http",
-                            "status_code": getattr(resp, "status_code", None),
-                            "response_text": (resp.text[:800] if resp is not None and resp.text else None),
+                            "stage": "unknown",
                             **exception_record(e),
                         })
-                        progress.console.log(f"[{i}/{len(payloads)}] ERROR: HTTP {getattr(resp,'status_code','?')} (logged)")
+                        progress.console.log(f"[{i}/{len(payloads)}] ERROR: {type(e).__name__} (logged)")
                         if not continue_on_error:
                             raise
                     finally:
@@ -358,8 +384,25 @@ def restore_command(
             "max_chars": max_chars,
             "dry_run": dry_run,
             "out_dir": str(out_dir),
+            "n_posted": n_posted,
+            "n_errors": n_errors,
         },
     )
+
+    final_status = "planned" if dry_run else ("completed" if n_errors == 0 else ("partial" if n_posted > 0 else "failed"))
+    conn = connect(paths.db_path)
+    try:
+        conn.execute(
+            """
+            UPDATE restore_requests
+            SET status=?, n_posted=?, n_errors=?
+            WHERE request_id=?
+            """,
+            (final_status, n_posted, n_errors, request_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
     if dry_run:
         typer.echo("Dry-run complete (no restore requests posted).")
