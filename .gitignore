@@ -1,0 +1,98 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.pyre/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+dist/
+build/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+*.whl
+
+# --- Virtual environments ---
+.venv/
+venv/
+ENV/
+env/
+.env
+
+# --- Jupyter / notebooks ---
+.ipynb_checkpoints/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- Logs ---
+*.log
+logs/
+**/logs/
+
+# --- Local secrets / tokens ---
+*.secrets.*
+*token*
+.env.local
+.env.*.local
+
+# --- Project data outputs (do NOT commit) ---
+# If you keep example projects under repo, consider putting them in /examples and removing these.
+raw/
+staged/
+staging/
+runs/
+review/
+cache/
+restore_requests/
+download_requests/
+idmaps/generated/
+busco_downloads/
+
+# Common nested project layout if users run inside the repo accidentally
+**/raw/
+**/staged/
+**/staging/
+**/runs/
+**/review/
+**/cache/
+**/restore_requests/
+**/download_requests/
+**/idmaps/generated/
+**/busco_downloads/
+
+# --- Databases / large artifacts ---
+*.sqlite
+*.sqlite3
+*.db
+*.jsonl
+*.tsv.gz
+*.fna
+*.faa
+*.fna.gz
+*.faa.gz
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# --- Cached API responses ---
+**/jgi_index_json/
+**/*.jgi.json
+
+# --- BUSCO outputs ---
+**/busco_results/
+**/short_summary*.txt
+**/run_*/  # BUSCO sometimes creates run_* folders
