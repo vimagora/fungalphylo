@@ -10,6 +10,7 @@ from pathlib import Path
 import requests
 from typer.testing import CliRunner
 
+from fungalphylo.cli.commands.restore import get_token as get_restore_token
 from fungalphylo.cli.commands.download import move_files_using_manifest
 from fungalphylo.core.hash import md5_bytes
 from fungalphylo.cli.main import app
@@ -129,6 +130,12 @@ def _response_with_bytes(content: bytes, *, status_code: int = 200, headers: dic
     response._content = content
     response.headers.update(headers or {})
     return response
+
+
+def test_restore_token_normalizes_bearer_prefix(monkeypatch) -> None:
+    monkeypatch.delenv("JGI_TOKEN", raising=False)
+    assert get_restore_token("session-token") == "Bearer session-token"
+    assert get_restore_token("Bearer already-prefixed") == "Bearer already-prefixed"
 
 
 def _zip_bytes(files: dict[str, str]) -> bytes:

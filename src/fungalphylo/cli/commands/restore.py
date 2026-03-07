@@ -39,11 +39,15 @@ def _now_tag() -> str:
 
 def get_token(explicit: Optional[str]) -> str:
     if explicit:
-        return explicit.strip()
+        tok = explicit.strip()
     env = os.getenv("JGI_TOKEN", "").strip()
-    if not env:
+    if not explicit and not env:
         raise typer.BadParameter("Missing JGI token. Provide --token or set env var JGI_TOKEN.")
-    return env
+    if not explicit:
+        tok = env
+    if not tok.lower().startswith("bearer "):
+        tok = f"Bearer {tok}"
+    return tok
 
 
 def compact_json(obj: Any) -> str:
