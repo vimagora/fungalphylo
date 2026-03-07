@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,9 +23,10 @@ from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.db.db import connect, init_db
 from fungalphylo.core.errors import log_error_jsonl, exception_record
 
-app = typer.Typer(help="Request that approved JGI files be restored from archive to disk (separate from download).")
+app = typer.Typer(help="Request that approved JGI files be restored from archive to disk in immutable batch directories.")
 
 RESTORE_URL = "https://files.jgi.doe.gov/request_archived_files/"
+TRANSIENT_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 
 def _now_iso() -> str:
@@ -176,6 +178,38 @@ def post_restore(payload: Dict[str, Any], token: str, timeout: int = 120) -> Dic
     return r.json()
 
 
+def is_transient_restore_error(exc: BaseException) -> bool:
+    if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+        return True
+    if isinstance(exc, requests.HTTPError):
+        resp = getattr(exc, "response", None)
+        return getattr(resp, "status_code", None) in TRANSIENT_HTTP_STATUS_CODES
+    return False
+
+
+def post_restore_with_retries(
+    payload: Dict[str, Any],
+    *,
+    token: str,
+    timeout: int,
+    retries: int,
+    retry_backoff_seconds: float,
+    log_retry,
+) -> Dict[str, Any]:
+    max_attempts = max(1, retries + 1)
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return post_restore(payload, token, timeout=timeout)
+        except Exception as exc:
+            if attempt >= max_attempts or not is_transient_restore_error(exc):
+                raise
+            delay = retry_backoff_seconds * (2 ** (attempt - 1))
+            log_retry(attempt, max_attempts, delay, exc)
+            time.sleep(delay)
+
+
 @app.callback(invoke_without_command=True)
 def restore_command(
     ctx: typer.Context,
@@ -184,10 +218,18 @@ def restore_command(
     portal_id: Optional[List[str]] = typer.Option(None, "--portal-id", help="Limit to specific portal IDs."),
     send_mail: bool = typer.Option(True, "--send-mail/--no-send-mail", help="Email when restore is ready."),
     max_chars: int = typer.Option(3500, "--max-chars", help="Max JSON character length per restore request."),
+    timeout: int = typer.Option(120, "--timeout", help="HTTP timeout seconds per request."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Build and write payloads but do not POST."),
     continue_on_error: bool = typer.Option(
         True, "--continue-on-error/--fail-fast", help="Default: continue posting other payloads if one fails."
-        ),
+    ),
+    retries: int = typer.Option(2, "--retries", min=0, help="Retries for transient restore failures (429/5xx/timeouts)."),
+    retry_backoff_seconds: float = typer.Option(
+        2.0,
+        "--retry-backoff-seconds",
+        min=0.0,
+        help="Base backoff in seconds for transient restore retries.",
+    ),
 ) -> None:
     if ctx.invoked_subcommand is not None:
         return
@@ -295,6 +337,7 @@ def restore_command(
     n_posted = 0
 
     n_errors = 0
+    fatal_error: Optional[BaseException] = None
 
     if not dry_run:
         with responses_path.open("w", encoding="utf-8") as rf:
@@ -318,7 +361,16 @@ def restore_command(
                         payload_len = len(compact_json(payload))
 
                         assert tok is not None
-                        resp = post_restore(payload, tok)
+                        resp = post_restore_with_retries(
+                            payload,
+                            token=tok,
+                            timeout=timeout,
+                            retries=retries,
+                            retry_backoff_seconds=retry_backoff_seconds,
+                            log_retry=lambda attempt, max_attempts, delay, exc: progress.console.log(
+                                f"[yellow]RETRY[/yellow] payload {i}: attempt {attempt + 1}/{max_attempts} in {delay:.1f}s after {type(exc).__name__}"
+                            ),
+                        )
 
                         rf.write(json.dumps({
                             "i": i,
@@ -352,7 +404,8 @@ def restore_command(
                         })
                         progress.console.log(f"[{i}/{len(payloads)}] ERROR: HTTP {getattr(resp,'status_code','?')} (logged)")
                         if not continue_on_error:
-                            raise
+                            fatal_error = e
+                            break
 
                     except Exception as e:
                         n_errors += 1
@@ -367,7 +420,8 @@ def restore_command(
                         })
                         progress.console.log(f"[{i}/{len(payloads)}] ERROR: {type(e).__name__} (logged)")
                         if not continue_on_error:
-                            raise
+                            fatal_error = e
+                            break
                     finally:
                         progress.advance(task)
 
@@ -382,10 +436,13 @@ def restore_command(
             "n_payloads": len(payloads),
             "send_mail": send_mail,
             "max_chars": max_chars,
+            "timeout": timeout,
             "dry_run": dry_run,
             "out_dir": str(out_dir),
             "n_posted": n_posted,
             "n_errors": n_errors,
+            "retries": retries,
+            "retry_backoff_seconds": retry_backoff_seconds,
         },
     )
 
@@ -408,3 +465,6 @@ def restore_command(
         typer.echo("Dry-run complete (no restore requests posted).")
     else:
         typer.echo(f"Posted {n_posted} restore request(s). Wait for email or check returned status URLs.")
+
+    if fatal_error is not None:
+        raise fatal_error

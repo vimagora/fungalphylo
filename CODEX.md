@@ -2,11 +2,49 @@
 
 Read this first when resuming work on `fungalphylo`.
 
-Before making changes in a new session:
+## Session Onboarding
 
-1. read `agent_context/project_master.md`
-2. read `agent_context/project_live.md`
-3. then inspect the current code before trusting older assumptions
+If you are a new agent session, do this in order before making changes:
+
+1. Read `agent_context/project_master.md`.
+   Use it for the durable technical overview: implemented workflow, architecture, reliability concerns, and the active backlog.
+2. Read `agent_context/project_live.md`.
+   Use it for the current working state: recently completed work, known debt, and the intended next work order.
+3. Read `docs/restart_contract.md`.
+   Use it as the source of truth for rerun, skip, and completion semantics of implemented commands.
+4. Read the code for the commands you are likely to touch before trusting any older note or README text:
+   - `src/fungalphylo/cli/commands/stage.py`
+   - `src/fungalphylo/cli/commands/download.py`
+   - `src/fungalphylo/cli/commands/restore.py`
+   - `src/fungalphylo/cli/commands/fetch_index.py`
+   - `src/fungalphylo/cli/commands/status.py`
+   - `src/fungalphylo/core/paths.py`
+   - `src/fungalphylo/db/schema.sql`
+5. Inspect the current tests before changing behavior:
+   - `tests/test_restore_download.py`
+   - `tests/test_stage_snapshots.py`
+   - `tests/test_fetch_index_cache.py`
+   - `tests/test_autoselect.py`
+   - `tests/test_db_command.py`
+   - `tests/test_core_utils.py`
+
+Behavior rules for a fresh session:
+
+- Trust the current code over the README or older notes when they conflict.
+- Treat `docs/restart_contract.md` as the operational contract for implemented commands.
+- Treat `staging/<staging_id>/...` as the immutable artifact model.
+- Assume restartability and durable local state matter more than adding new surface area.
+- Before editing behavior, verify whether tests already describe that behavior.
+
+If you need to understand where truth lives:
+
+- workflow/architecture: `agent_context/project_master.md`
+- current status and next work: `agent_context/project_live.md`
+- rerun/skip semantics: `docs/restart_contract.md`
+- filesystem layout: `src/fungalphylo/core/paths.py`
+- durable state model: `src/fungalphylo/db/schema.sql`
+- command behavior: `src/fungalphylo/cli/commands/`
+- regression coverage: `tests/`
 
 ## Project In One Minute
 
@@ -33,9 +71,10 @@ The main risks are not scale-related. They are semantic drift and incomplete res
 - `db` now enforces read-only SQL and opens SQLite in read-only mode.
 - `restore --dry-run` and `download --dry-run` now build payloads without requiring JGI authentication.
 - `download` now safely creates `unmatched_manifest.tsv` even when the kept-manifest directory does not yet exist.
+- `download` now retries transient `429`/`5xx`/timeout failures and verifies raw-file `md5` when source metadata provides it.
 - restore/download batch directories are now indexed in SQLite via `restore_requests` and `download_requests`.
 - download failure paths for malformed non-zip responses and missing manifest files are now covered by tests and recorded as failed batches.
-- compute commands beyond BUSCO are placeholders or absent.
+- compute commands beyond BUSCO are absent.
 - the pytest suite now covers snapshot creation/reuse, cache-only fetch ingest, autoselect scoring/config behavior, db read-only enforcement, FASTA roundtrips, ID map loading, raw path resolution, restore/download request-ledger writes, restore dry-run/continue-on-error behavior, and download manifest mismatch/malformed-bundle handling.
 - legacy `staged_files` has been removed from the schema; `staging_files` is the active staging artifact table.
 
@@ -43,11 +82,12 @@ The main risks are not scale-related. They are semantic drift and incomplete res
 
 1. `agent_context/project_master.md`
 2. `agent_context/project_live.md`
-3. `src/fungalphylo/cli/commands/stage.py`
-4. `src/fungalphylo/core/paths.py`
-5. `src/fungalphylo/cli/commands/download.py`
-6. `src/fungalphylo/cli/commands/restore.py`
-7. `src/fungalphylo/cli/commands/fetch_index.py`
+3. `docs/restart_contract.md`
+4. `src/fungalphylo/cli/commands/stage.py`
+5. `src/fungalphylo/core/paths.py`
+6. `src/fungalphylo/cli/commands/download.py`
+7. `src/fungalphylo/cli/commands/restore.py`
+8. `src/fungalphylo/cli/commands/fetch_index.py`
 
 ## Main Architectural Question
 
@@ -58,10 +98,9 @@ The active implementation work is to make every relevant command and document ho
 ## High-Priority Known Issues
 
 - some onboarding docs still contain historical pre-refactor notes
-- placeholder command modules exist without functionality
 - restore/download are now batch-tracked in SQLite, but the remote-side lifecycle is still not modeled beyond local batch outcomes
-- `download` skip behavior still depends on raw-file presence or staged file IDs rather than checksum-aware raw state
-- download still has no retry/backoff policy for transient HTTP or bundle-processing failures
+- `download` now verifies raw-file `md5` when source metadata provides it, but staged-snapshot skips are still source-file-ID based
+- the explicit restart contract now lives in `docs/restart_contract.md`; keep that file aligned with command behavior
 
 ## Working Principles For Changes
 

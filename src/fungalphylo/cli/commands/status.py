@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.table import Table as RichTable
 
 from fungalphylo.core.config import load_yaml, resolve_config
+from fungalphylo.core.hash import file_matches_md5
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.core.resolve import resolve_raw_path
 from fungalphylo.db.db import connect, init_db
@@ -102,8 +103,8 @@ def status_command(
             """
             SELECT
               a.portal_id,
-              a.proteome_file_id, pf1.filename AS proteome_filename,
-              a.cds_file_id, pf2.filename AS cds_filename
+              a.proteome_file_id, pf1.filename AS proteome_filename, pf1.md5 AS proteome_md5,
+              a.cds_file_id, pf2.filename AS cds_filename, pf2.md5 AS cds_md5
             FROM approvals a
             JOIN portal_files pf1 ON pf1.file_id = a.proteome_file_id
             LEFT JOIN portal_files pf2 ON pf2.file_id = a.cds_file_id
@@ -116,7 +117,9 @@ def status_command(
     # Compute raw presence
     present = 0
     missing = 0
+    mismatched = 0
     missing_samples: List[str] = []
+    mismatched_samples: List[str] = []
 
     for r in rows:
         pid = r["portal_id"]
@@ -128,8 +131,12 @@ def status_command(
             file_id=r["proteome_file_id"],
             filename=r["proteome_filename"],
         )
-        if prot_raw.exists():
+        if file_matches_md5(prot_raw, r["proteome_md5"]):
             present += 1
+        elif prot_raw.exists():
+            mismatched += 1
+            if len(mismatched_samples) < sample_missing:
+                mismatched_samples.append(f"{pid}\tproteome\t{prot_raw}")
         else:
             missing += 1
             if len(missing_samples) < sample_missing:
@@ -143,8 +150,12 @@ def status_command(
                 file_id=r["cds_file_id"],
                 filename=r["cds_filename"],
             )
-            if cds_raw.exists():
+            if file_matches_md5(cds_raw, r["cds_md5"]):
                 present += 1
+            elif cds_raw.exists():
+                mismatched += 1
+                if len(mismatched_samples) < sample_missing:
+                    mismatched_samples.append(f"{pid}\tcds\t{cds_raw}")
             else:
                 missing += 1
                 if len(missing_samples) < sample_missing:
@@ -186,13 +197,19 @@ def status_command(
 
     t2 = RichTable(title="Raw cache completeness (approved files)", show_lines=False)
     t2.add_column("Present", justify="right")
+    t2.add_column("Checksum mismatch", justify="right")
     t2.add_column("Missing", justify="right")
-    t2.add_row(str(present), str(missing))
+    t2.add_row(str(present), str(mismatched), str(missing))
     console.print(t2)
 
     if missing_samples:
         console.print("\n[bold]Missing raw files (sample):[/bold]")
         for line in missing_samples:
+            console.print("  " + line)
+
+    if mismatched_samples:
+        console.print("\n[bold]Checksum-mismatched raw files (sample):[/bold]")
+        for line in mismatched_samples:
             console.print("  " + line)
 
     console.print()

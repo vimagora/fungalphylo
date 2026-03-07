@@ -6,10 +6,37 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence, Tuple
 
 
+def md5_bytes(data: bytes) -> str:
+    h = hashlib.md5()
+    h.update(data)
+    return h.hexdigest()
+
+
 def sha256_bytes(data: bytes) -> str:
     h = hashlib.sha256()
     h.update(data)
     return h.hexdigest()
+
+
+def md5_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
+    """
+    Stream a file and return its md5 hex digest.
+    """
+    path = path.expanduser().resolve()
+    h = hashlib.md5()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def file_matches_md5(path: Path, expected_md5: str | None) -> bool:
+    path = path.expanduser().resolve()
+    if not path.exists():
+        return False
+    if not expected_md5:
+        return True
+    return md5_file(path).lower() == expected_md5.strip().lower()
 
 
 def sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:

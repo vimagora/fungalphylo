@@ -30,10 +30,11 @@ The main problem is not missing architecture. It is drift:
 - docs do not fully match code
 - path semantics had drifted (`staging/` vs `staged/`); the code is now being moved to `staging/<staging_id>/` as the source of truth
 - some restart behavior is real, but only at selected boundaries
-- some commands are planned-only placeholders
 - tests now exist, but coverage is still minimal
 
 The project is viable, but before expanding compute steps it needs consolidation around a single execution model and a documented restart contract.
+
+The current documented restart contract for implemented commands lives in `docs/restart_contract.md`.
 
 ## 2. What Exists Today
 
@@ -43,7 +44,6 @@ The project is viable, but before expanding compute steps it needs consolidation
   - registers the user-facing CLI
 - `src/fungalphylo/cli/commands/`
   - implemented commands: `init`, `ingest`, `fetch_index`, `autoselect`, `review`, `restore`, `download`, `stage`, `status`, `idmap`, `busco_slurm`, `db`
-  - empty placeholder modules exist for `doctor`, `smoke_test`, `run_orthofinder`, `run_species_tree`, `run_family`, `apply_review`, `export_review`
 - `src/fungalphylo/core/`
   - path handling, config, FASTA I/O, id mapping, manifests, events/errors, hashing, validation
 - `src/fungalphylo/db/`
@@ -132,7 +132,7 @@ The duplicate `staged_proteome_dir` bug has been removed. The remaining task is 
 
 ### 4.2 Snapshot-first staging is now the target model
 
-The code is being refactored so `stage` writes the normalized FASTA artifacts, generated ID maps, reports, manifest, and checksums under `staging/<staging_id>/...`.
+The code now writes the normalized FASTA artifacts, generated ID maps, reports, manifest, and checksums under `staging/<staging_id>/...`.
 
 The remaining work is to finish propagating that model through the rest of the workflow and documentation.
 
@@ -145,11 +145,13 @@ The project already has useful skip behavior:
 - `stage` can reuse equivalent artifacts by cache key across snapshots
 - `markers.py` provides `STARTED`/`DONE` helpers for future run-level checkpointing
 
-But restartability is not yet unified:
+The restart contract is now documented in `docs/restart_contract.md`, but a few implementation boundaries remain open:
 
-- `stage` reuse is now keyed by a staging artifact cache key derived from source checksum and parameters, but the cache contract still needs tests and documentation
-- `download` skip logic is filesystem-existence based, not checksum-based
-- `restore` and `download` now have batch-level request tracking in SQLite, but not a full per-payload or remote-state lifecycle model
+- `stage` reuse is now keyed by a staging artifact cache key derived from source checksum and parameters, but the cache contract still needs broader tests
+- `download` now verifies existing raw files against source `md5` when that metadata is available, but otherwise falls back to path existence
+- `download` now retries transient `429`/`5xx`/timeout failures before marking a payload failed
+- `restore` now retries transient `429`/`5xx`/timeout failures before marking a payload failed
+- `restore` and `download` now have batch-level request tracking in SQLite by design; per-payload detail remains in request directories and JSONL/files rather than child tables
 - compute commands are mostly not implemented, so run markers are not yet part of the real execution path
 
 Recent improvements in this area:
@@ -165,8 +167,6 @@ Recent improvements in this area:
 Examples:
 
 - README is now closer to the current CLI, but some onboarding notes still lag behind
-- several command modules exist but are empty placeholders
-- `main.py` does not expose placeholder compute commands
 - README and some onboarding docs still need to be updated to the new snapshot-first behavior
 
 This is manageable, but it creates onboarding confusion and makes maintenance harder.
@@ -190,9 +190,8 @@ This is a meaningful improvement, but long-running network and manifest edge cas
 
 ### 4.6 A few concrete command-level issues
 
-- `download` still decides some skips using filesystem presence or staged file IDs rather than checksum-aware raw state.
-- `restore` and `download` now record batch-level request history in SQLite, but per-payload outcomes still live only in JSONL/files.
-- empty command modules are present and compiled, which is harmless but increases perceived surface area without adding functionality.
+- `download` intentionally decides staged-snapshot skips using approved source file IDs rather than checksum-aware raw state.
+- `restore` and `download` now record batch-level request history in SQLite, while detailed per-payload outcomes live in request directories and JSONL/files.
 
 ### 4.7 Some dependencies and abstractions are ahead of reality
 
@@ -243,14 +242,19 @@ The remaining question is whether any compatibility layer around the old `staged
 
 ### Priority 2: define restartability at each boundary
 
-For every command, document:
+The baseline contract is now written down. The remaining work is to keep code, docs, and status surfaces aligned on it. For every command, preserve clarity on:
 
 - what inputs define “same work”
 - what durable record proves completion
 - when the command skips
 - when the command must rerun
 
-This should become part of both the docs and the code.
+For `restore` and `download`, keep SQLite at the batch-ledger level unless payload-level resume becomes a concrete requirement. The current intended boundary is:
+
+- SQLite for discovery and high-level status
+- request directories plus JSONL/files for payload-level evidence
+
+This should stay aligned in both the docs and the code.
 
 ### Priority 3: add a minimal test suite
 
@@ -271,7 +275,6 @@ Before implementing OrthoFinder/species-tree/family runs:
 
 - expand regression coverage
 - align the remaining onboarding docs
-- add a simple `doctor` command or remove the placeholder until it exists
 
 ### Priority 5: keep the project lightweight
 
@@ -304,10 +307,8 @@ Operational recommendations for CSC environments:
 
 These are the most important short-term tasks.
 
-1. Document the restart/skip contract for `restore`, `download`, and `stage` in repo docs.
-2. Decide whether batch-level request history is sufficient or whether per-payload SQLite rows add enough value.
-3. Decide whether download should add minimal retry/backoff semantics for transient HTTP failures.
-4. Either implement or remove placeholder command modules from the active mental model.
+1. Propagate `docs/restart_contract.md` into any remaining onboarding surfaces and command help where useful.
+2. Keep the documented command surface limited to implemented workflow steps until new compute commands actually exist.
 
 ## 10. Practical Guidance For New Developers
 

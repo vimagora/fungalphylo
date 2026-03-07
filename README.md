@@ -8,6 +8,8 @@ A reproducible, user-friendly phylogenomics pipeline for fungal datasets built a
 - **JGI Files API** for file discovery, restore, and download
 - **TSV review loop** for human-in-the-loop selection
 
+The explicit rerun/completion contract for implemented commands is documented in `docs/restart_contract.md`.
+
 This repo is designed so **download is I/O only** (keeps raw artifacts), while **stage** performs normalization (IDs, filtering, mapping manifests).
 
 ---
@@ -168,9 +170,11 @@ This writes payloads + responses under:
 Restore restart behavior:
 - `--dry-run` writes the payloads without requiring a token or posting requests
 - normal runs always write payload JSON before any POST attempt
+- `--retries` and `--retry-backoff-seconds` retry transient `429`/`5xx`/timeout restore failures before the payload is marked failed
 - `--continue-on-error` logs per-payload failures to `logs/errors.jsonl` and continues posting the remaining payloads
 - reruns create a new `restore_requests/<timestamp>/` directory rather than mutating an old request batch
 - each restore batch is also indexed in SQLite `restore_requests` so `status` can show the latest request state without scanning directories
+- SQLite stores only the batch ledger; inspect `payload_*.json`, `responses.jsonl`, and `logs/errors.jsonl` for payload-level detail
 
 ### 7) Download approved files into raw cache
 
@@ -189,12 +193,14 @@ This:
 Download restart behavior:
 - `--dry-run` writes payloads without requiring a token or downloading bundles
 - normal runs always write payload JSON before any POST attempt and finish with `summary.json`
-- `--skip-if-raw-present` skips approved files already present at the configured raw path
-- `--overwrite-staged` disables the default skip for files already represented in any staging snapshot
+- `--skip-if-raw-present` skips approved files already present at the configured raw path and verifies md5 when source metadata provides one
+- `--overwrite-staged` disables the default skip for approved source file IDs already represented in any staging snapshot
+- `--retries` and `--retry-backoff-seconds` retry transient `429`/`5xx`/timeout download failures before the payload is marked failed
 - `--continue-on-error` logs per-payload failures to `logs/errors.jsonl` and continues with the remaining payloads
 - reruns create a new `download_requests/<timestamp>/` directory rather than mutating an old request batch
 - each download batch is also indexed in SQLite `download_requests` so `status` can show the latest batch outcome and counts quickly
 - malformed non-zip responses and extracted bundles with no manifest are treated as per-payload failures, logged to `logs/errors.jsonl`, and reflected in the batch ledger/status
+- SQLite stores only the batch ledger; inspect the request directory, manifests, `summary.json`, and `logs/errors.jsonl` for payload-level detail
 
 ### 8) Stage (normalize + map + manifest)
 

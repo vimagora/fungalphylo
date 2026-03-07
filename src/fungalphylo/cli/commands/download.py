@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import time
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,13 +26,15 @@ from rich.progress import (
 from fungalphylo.core.config import load_yaml, resolve_config
 from fungalphylo.core.errors import exception_record, log_error_jsonl
 from fungalphylo.core.events import log_event
+from fungalphylo.core.hash import file_matches_md5
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.core.resolve import resolve_raw_path
 from fungalphylo.db.db import connect, init_db
 
-app = typer.Typer(help="Download approved (restored) JGI files into raw/ cache (processing happens in stage).")
+app = typer.Typer(help="Download approved JGI files into raw/ via immutable batch directories; staging remains the normalized source.")
 
 DOWNLOAD_URL = "https://files-download.jgi.doe.gov/download_files/"
+TRANSIENT_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 
 def _now_iso() -> str:
@@ -152,6 +155,38 @@ def post_download(payload: Dict[str, Any], token: str, timeout: int = 300) -> re
         raise RuntimeError(f"Auth failed ({r.status_code}). Check JGI_TOKEN / --token.")
     r.raise_for_status()
     return r
+
+
+def is_transient_download_error(exc: BaseException) -> bool:
+    if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+        return True
+    if isinstance(exc, requests.HTTPError):
+        resp = getattr(exc, "response", None)
+        return getattr(resp, "status_code", None) in TRANSIENT_HTTP_STATUS_CODES
+    return False
+
+
+def post_download_with_retries(
+    payload: Dict[str, Any],
+    *,
+    token: str,
+    timeout: int,
+    retries: int,
+    retry_backoff_seconds: float,
+    log_retry,
+) -> requests.Response:
+    max_attempts = max(1, retries + 1)
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return post_download(payload, token, timeout=timeout)
+        except Exception as exc:
+            if attempt >= max_attempts or not is_transient_download_error(exc):
+                raise
+            delay = retry_backoff_seconds * (2 ** (attempt - 1))
+            log_retry(attempt, max_attempts, delay, exc)
+            time.sleep(delay)
 
 
 def save_and_extract_zip_bundle(resp: requests.Response, bundles_dir: Path, bundle_name: str) -> Tuple[Path, Path]:
@@ -320,9 +355,16 @@ def download_command(
     skip_if_raw_present: bool = typer.Option(
         False,
         "--skip-if-raw-present",
-        help="Skip downloading if the raw file already exists at raw/<portal>/<file_id>/<filename>.",
+        help="Skip downloading if the raw file already exists and, when source md5 is known, matches the approved file.",
     ),
     continue_on_error: bool = typer.Option(True, "--continue-on-error/--fail-fast", help="Continue if one payload fails."),
+    retries: int = typer.Option(2, "--retries", min=0, help="Retries for transient download failures (429/5xx/timeouts)."),
+    retry_backoff_seconds: float = typer.Option(
+        2.0,
+        "--retry-backoff-seconds",
+        min=0.0,
+        help="Base backoff in seconds for transient download retries.",
+    ),
     retain: str = typer.Option("manifest", "--retain", help="manifest (default), zip, or all."),
 ) -> None:
     if ctx.invoked_subcommand is not None:
@@ -343,7 +385,7 @@ def download_command(
     tok: Optional[str] = None if dry_run else get_token(token)
     errors_log = paths.errors_log
 
-    # staged map
+    # Track all staged source file IDs per portal/kind so any matching snapshot can suppress a re-download.
     conn = connect(paths.db_path)
     try:
         staged = conn.execute(
@@ -354,7 +396,10 @@ def download_command(
         ).fetchall()
     finally:
         conn.close()
-    staged_map = {(r["portal_id"], r["kind"]): r["file_id"] for r in staged}
+    staged_file_ids: Dict[Tuple[str, str], set[str]] = {}
+    for r in staged:
+        key = (r["portal_id"], r["kind"])
+        staged_file_ids.setdefault(key, set()).add(r["file_id"])
 
     # approvals + filenames
     conn = connect(paths.db_path)
@@ -371,8 +416,10 @@ def download_command(
               a.portal_id,
               a.proteome_file_id,
               pf1.filename AS proteome_filename,
+              pf1.md5 AS proteome_md5,
               a.cds_file_id,
               pf2.filename AS cds_filename,
+              pf2.md5 AS cds_md5,
               p.dataset_id,
               p.top_hit_id
             FROM approvals a
@@ -398,16 +445,18 @@ def download_command(
 
             prot_id = r["proteome_file_id"]
             prot_fn = r["proteome_filename"]
+            prot_md5 = r["proteome_md5"]
 
             cds_id = r["cds_file_id"]
             cds_fn = r["cds_filename"]
+            cds_md5 = r["cds_md5"]
 
             # skip if the approved file already exists in any staging snapshot
             if not overwrite_staged:
-                if staged_map.get((pid, "proteome")) == prot_id:
+                if prot_id and prot_id in staged_file_ids.get((pid, "proteome"), set()):
                     prot_id = None
                     prot_fn = None
-                if cds_id and staged_map.get((pid, "cds")) == cds_id:
+                if cds_id and cds_id in staged_file_ids.get((pid, "cds"), set()):
                     cds_id = None
                     cds_fn = None
 
@@ -421,7 +470,7 @@ def download_command(
                         file_id=prot_id,
                         filename=prot_fn,
                     )
-                    if raw_prot.exists():
+                    if file_matches_md5(raw_prot, prot_md5):
                         prot_id = None
                         prot_fn = None
 
@@ -433,7 +482,7 @@ def download_command(
                         file_id=cds_id,
                         filename=cds_fn,
                     )
-                    if raw_cds.exists():
+                    if file_matches_md5(raw_cds, cds_md5):
                         cds_id = None
                         cds_fn = None
 
@@ -515,6 +564,8 @@ def download_command(
                 "out_dir": str(out_dir),
                 "skip_if_raw_present": skip_if_raw_present,
                 "overwrite_staged": overwrite_staged,
+                "retries": retries,
+                "retry_backoff_seconds": retry_backoff_seconds,
             },
         )
         return
@@ -526,6 +577,7 @@ def download_command(
     n_payload_ok = 0
     moved_total = 0
     missing_total = 0
+    fatal_error: Optional[BaseException] = None
 
     with Progress(
         TextColumn("Payload:"),
@@ -543,7 +595,16 @@ def download_command(
             progress.update(task, payload=f"{i:03d}/{len(payloads):03d}".ljust(10))
             try:
                 assert tok is not None
-                resp = post_download(payload, tok, timeout=timeout)
+                resp = post_download_with_retries(
+                    payload,
+                    token=tok,
+                    timeout=timeout,
+                    retries=retries,
+                    retry_backoff_seconds=retry_backoff_seconds,
+                    log_retry=lambda attempt, max_attempts, delay, exc: progress.console.log(
+                        f"[yellow]RETRY[/yellow] payload {i}: attempt {attempt + 1}/{max_attempts} in {delay:.1f}s after {type(exc).__name__}"
+                    ),
+                )
 
                 zip_name = f"bundle_{i:03d}.zip"
                 cd = resp.headers.get("Content-Disposition", "")
@@ -602,7 +663,8 @@ def download_command(
                 )
                 progress.console.log(f"[red]ERROR[/red] payload {i}: HTTP error (logged).")
                 if not continue_on_error:
-                    raise
+                    fatal_error = e
+                    break
 
             except Exception as e:
                 n_errors += 1
@@ -618,7 +680,8 @@ def download_command(
                 )
                 progress.console.log(f"[red]ERROR[/red] payload {i}: {type(e).__name__} (logged).")
                 if not continue_on_error:
-                    raise
+                    fatal_error = e
+                    break
 
             finally:
                 progress.advance(task)
@@ -634,6 +697,8 @@ def download_command(
         "raw_dir": str(paths.raw_dir),
         "skip_if_raw_present": skip_if_raw_present,
         "overwrite_staged": overwrite_staged,
+        "retries": retries,
+        "retry_backoff_seconds": retry_backoff_seconds,
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
@@ -652,6 +717,8 @@ def download_command(
             "missing_files": missing_total,
             "skip_if_raw_present": skip_if_raw_present,
             "overwrite_staged": overwrite_staged,
+            "retries": retries,
+            "retry_backoff_seconds": retry_backoff_seconds,
         },
     )
 
@@ -673,3 +740,6 @@ def download_command(
     typer.echo(f"Done. Payloads OK: {n_payload_ok}/{len(payloads)}. Errors: {n_errors}.")
     typer.echo(f"Moved into raw/: {moved_total}. Missing/unmoved entries: {missing_total}.")
     typer.echo(f"Kept in download_requests: payloads + manifest(s) + summary (retain={retain}).")
+
+    if fatal_error is not None:
+        raise fatal_error

@@ -12,6 +12,7 @@ This is the working status board for developers. It is intentionally short and o
 
 ## Recently Completed
 
+- the implemented command restart contract is now documented in `docs/restart_contract.md`.
 - `stage` now writes snapshot-scoped artifacts under `staging/<staging_id>/`.
 - snapshot artifact metadata is now recorded in `staging_files`.
 - stage artifact reuse now uses a cache key instead of the old mutable-output assumption.
@@ -20,11 +21,14 @@ This is the working status board for developers. It is intentionally short and o
 - README has been updated to the snapshot-first model.
 - `fetch-index --ingest-from-cache` no longer requires JGI authentication.
 - `restore` now handles non-HTTP per-payload failures under `--continue-on-error`.
+- `restore` now retries transient `429`/`5xx`/timeout failures before marking a payload failed.
 - `autoselect` now honors config-driven scoring weights and configurable ban patterns, with regression tests.
 - `db` now enforces read-only SQL and opens SQLite in read-only mode, with regression tests.
 - `restore --dry-run` and `download --dry-run` no longer require JGI authentication when only building payloads.
 - `download` now safely writes `unmatched_manifest.tsv` even when the target directory does not already exist.
 - restore/download request batches are now indexed in SQLite via `restore_requests` and `download_requests`, and `status` reads from that ledger.
+- `download` now retries transient `429`/`5xx`/timeout failures and verifies raw-file `md5` when source metadata provides it.
+- `status` now distinguishes checksum-mismatched raw files from missing raw files.
 - malformed non-zip download responses and extracted bundles with no manifest are now covered by regression tests and recorded as failed download batches.
 - pytest coverage now includes snapshot creation/reuse, cache-only fetch ingest, autoselect scoring/config behavior, db read-only enforcement, FASTA roundtrips, ID map loading, raw path resolution, restore/download request-ledger behavior, restore partial-failure handling, and download manifest mismatch/malformed-bundle handling.
 - legacy `staged_files` has been removed from the schema in favor of `staging_files`.
@@ -46,36 +50,28 @@ This is the working status board for developers. It is intentionally short and o
 
 ### Reliability
 
-- decide whether request-ledger rows need a child table for per-payload outcomes or whether JSONL files remain sufficient
-- decide whether download should gain a minimal retry/backoff policy for transient HTTP failures
+- keep request-ledger rows batch-scoped; use request directories and JSONL as the per-payload forensic record
 
 ### Restartability
 
-- decide and document the canonical restart model for each command
 - finish propagating the new immutable snapshot model through downstream commands and docs
-- move from existence/file-id based skips toward checksum + parameter aware skips where it matters
-- decide whether restore/download request history should also be tracked in SQLite
+- extend checksum + parameter aware skips where they matter beyond the current raw-file `md5` check
 
 ### Maintainability
 
-- remove or implement placeholder command modules
 - centralize repeated timestamp helper logic if it starts spreading further
 
 ## Known Technical Debt
 
 - some onboarding docs still have historical notes that should now be rewritten
-- several empty modules imply features that do not yet exist
 - `pydantic` is declared but not materially used
-- `download` skip behavior is still based on file presence or staged file IDs rather than checksum-aware raw state
-- restore/download request batches are queryable from SQLite, but per-payload outcomes still live only in JSONL/files
-- download has no built-in retry/backoff semantics for transient remote errors
+- `download` now verifies existing raw files against source `md5` when available; staged-snapshot skips intentionally remain based on approved source file IDs
+- restore/download keep only batch rows in SQLite by design; detailed per-payload outcomes live in request directories and JSONL/files
 
 ## Suggested Work Order
 
-1. Decide whether the request ledger needs per-payload child rows or whether JSONL remains the right boundary.
-2. Decide whether download should gain a minimal retry/backoff policy for transient HTTP failures.
-3. Update the remaining onboarding docs and README details to match code exactly.
-4. Only then implement additional compute steps.
+1. Propagate `docs/restart_contract.md` into any remaining onboarding notes and command help where useful.
+2. Only then implement additional compute steps.
 
 ## Definition Of “Good Enough” For The Next Milestone
 
