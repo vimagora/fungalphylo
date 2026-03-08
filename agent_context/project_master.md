@@ -36,6 +36,8 @@ The project is viable, but before expanding compute steps it needs consolidation
 
 The current documented restart contract for implemented commands lives in `docs/restart_contract.md`.
 
+A full real-data validation run has now completed successfully through `stage`, which materially reduces uncertainty around the intake side of the project.
+
 ## 2. What Exists Today
 
 ### Package layout
@@ -211,11 +213,21 @@ Most reliable areas:
 - SQLite-backed approvals
 - raw file retention
 - deterministic FASTA rewriting for staged outputs
+- the full intake path from `init` through `stage` has now been exercised successfully on a large real-data project
+
+Real-data validation currently on record:
+
+- more than 2000 portal rows ingested from a MycoCosm-derived source table
+- files fetched for 1820 published portals
+- 150 portals reviewed and selected, corresponding to 300 approved files
+- only one manual file correction needed after `autoselect`
+- restore, download, stage, status, and helper commands all worked cleanly after fixing restore token normalization
 
 Least reliable areas:
 
 - remaining long-running command semantics outside the newly-tested paths
 - broader regression coverage
+- downstream BUSCO script generation/submission has not yet received the same real-data validation
 - residual drift between implementation and older onboarding notes
 
 ## 6. Maintainability Assessment
@@ -295,6 +307,7 @@ The current code is broadly compatible with Puhti-style usage:
 - SQLite is appropriate for single-user or low-contention workflows
 - SLURM integration begins with `busco-slurm`
 - logs and manifests are lightweight
+- local development should write SLURM scripts for review by default; keep submit code paths available, but do not depend on live Puhti submission outside CSC
 
 Operational recommendations for CSC environments:
 
@@ -307,8 +320,10 @@ Operational recommendations for CSC environments:
 
 These are the most important short-term tasks.
 
-1. Propagate `docs/restart_contract.md` into any remaining onboarding surfaces and command help where useful.
-2. Keep the documented command surface limited to implemented workflow steps until new compute commands actually exist.
+1. Review `busco-slurm` against the current snapshot-first staging model and update any stale path or argument assumptions.
+2. Add regression coverage for BUSCO script generation and the optional submit code path without requiring live Puhti access.
+3. Test BUSCO script generation and submission on CSC/Puhti from a validated `staging_id` when cluster access is available.
+3. Keep the documented command surface limited to implemented workflow steps until new compute commands actually exist.
 
 ## 10. Practical Guidance For New Developers
 

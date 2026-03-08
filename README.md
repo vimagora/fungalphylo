@@ -259,10 +259,14 @@ Mapping lookup is **primary by exact original_header** (most reliable), with opt
 For BUSCO on Puhti / SLURM:
 
 ```bash
-fungalphylo busco-slurm /path/to/project --staging-id <staging_id> --submit
+fungalphylo busco-slurm /path/to/project --staging-id <staging_id>
 ```
 
 If `--staging-id` is omitted, the latest staging snapshot is used.
+
+Use `--submit` only on systems that actually have `sbatch` access. In local development, the intended workflow is to write the SLURM script, review it, and submit it later on Puhti.
+
+Each BUSCO script generation also writes `runs/<run_id>/manifest.json` and records a `runs` row in SQLite.
 
 ---
 

@@ -67,6 +67,8 @@ The main risks are not scale-related. They are semantic drift and incomplete res
 - Trust the code over the README when they conflict.
 - `stage` now writes snapshot-scoped artifacts under `staging/<staging_id>/`.
 - `busco-slurm` consumes a chosen `staging_id` or the latest snapshot by default.
+- `busco-slurm` now writes a run manifest under `runs/<run_id>/manifest.json` and records a `runs` ledger row when generating the SLURM script.
+- In this local development environment, compute commands should default to writing SLURM scripts only; keep explicit submit support in code, but do not rely on live Puhti submission during development or tests.
 - `autoselect` now honors config-driven scoring weights and configurable ban patterns.
 - `db` now enforces read-only SQL and opens SQLite in read-only mode.
 - `restore --dry-run` and `download --dry-run` now build payloads without requiring JGI authentication.
@@ -77,6 +79,10 @@ The main risks are not scale-related. They are semantic drift and incomplete res
 - compute commands beyond BUSCO are absent.
 - the pytest suite now covers snapshot creation/reuse, cache-only fetch ingest, autoselect scoring/config behavior, db read-only enforcement, FASTA roundtrips, ID map loading, raw path resolution, restore/download request-ledger writes, restore dry-run/continue-on-error behavior, and download manifest mismatch/malformed-bundle handling.
 - legacy `staged_files` has been removed from the schema; `staging_files` is the active staging artifact table.
+- a real-data run has now validated the workflow from `init` through `stage` on a large MycoCosm-derived project.
+- the validated run ingested more than 2000 portal rows, fetched files from 1820 published portals, and reviewed/selected 150 portals (300 files).
+- `autoselect` performed strongly in that run, requiring only one file correction across the reviewed set.
+- restore, download, stage, status, and helper commands all worked cleanly in the validated run after the `restore` bearer-token fix.
 
 ## Files To Read First
 
@@ -101,6 +107,7 @@ The active implementation work is to make every relevant command and document ho
 - restore/download are now batch-tracked in SQLite, but the remote-side lifecycle is still not modeled beyond local batch outcomes
 - `download` now verifies raw-file `md5` when source metadata provides it, but staged-snapshot skips are still source-file-ID based
 - the explicit restart contract now lives in `docs/restart_contract.md`; keep that file aligned with command behavior
+- the next practical milestone is to review and update `busco-slurm` against the current snapshot-first staging model, then test script writing locally and validate optional submission behavior separately on CSC/Puhti
 
 ## Working Principles For Changes
 

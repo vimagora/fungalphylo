@@ -171,6 +171,8 @@ Same work:
 
 Completion proof:
 - the generated SLURM script on disk
+- `runs/<run_id>/manifest.json`
+- `runs` ledger row in SQLite
 
 Skip behavior:
 - none at the workflow level; rerunning regenerates the script
@@ -178,6 +180,10 @@ Skip behavior:
 Rerun contract:
 - always safe to rerun
 - operational identity comes from the referenced `staging_id`, not from mutable staged paths
+
+Operator guidance:
+- in local development environments without Puhti access, use `busco-slurm` to write the script for review and manual transfer
+- keep the optional submit path implemented for real CSC usage, but do not make normal development or tests depend on successful `sbatch`
 
 ## Status Interpretation
 

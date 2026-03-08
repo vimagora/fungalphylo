@@ -9,6 +9,7 @@ This is the working status board for developers. It is intentionally short and o
 - OrthoFinder/species-tree/family compute runs are not implemented.
 - The current pytest suite covers staging snapshots, cache-ingest behavior, autoselect scoring/config behavior, db read-only enforcement, FASTA roundtrips, ID map loading, and raw path resolution.
 - Code compiles with `python -m compileall src`.
+- A real-data validation run has now completed successfully from `init` through `stage`.
 
 ## Recently Completed
 
@@ -17,6 +18,8 @@ This is the working status board for developers. It is intentionally short and o
 - snapshot artifact metadata is now recorded in `staging_files`.
 - stage artifact reuse now uses a cache key instead of the old mutable-output assumption.
 - `busco-slurm` can target a chosen `staging_id` and defaults to the latest snapshot.
+- local development should only write SLURM scripts for review; optional submit paths should remain implemented but are not expected to be exercised without Puhti access
+- `busco-slurm` now writes `runs/<run_id>/manifest.json` and records a `runs` row when it generates a script.
 - the broken duplicate path helper in `src/fungalphylo/core/paths.py` was removed.
 - README has been updated to the snapshot-first model.
 - `fetch-index --ingest-from-cache` no longer requires JGI authentication.
@@ -33,6 +36,9 @@ This is the working status board for developers. It is intentionally short and o
 - pytest coverage now includes snapshot creation/reuse, cache-only fetch ingest, autoselect scoring/config behavior, db read-only enforcement, FASTA roundtrips, ID map loading, raw path resolution, restore/download request-ledger behavior, restore partial-failure handling, and download manifest mismatch/malformed-bundle handling.
 - legacy `staged_files` has been removed from the schema in favor of `staging_files`.
 - `status` now reports latest snapshot details including artifact counts and reuse counts.
+- a real-data project ingested more than 2000 portal rows from a MycoCosm-derived table and fetched files for 1820 published portals.
+- `autoselect` performed strongly on that run; among 150 reviewed portals (300 selected files), only one file needed manual correction.
+- restore, download, stage, status, and helper commands all worked cleanly in that run after the `restore` bearer-token normalization fix.
 
 ## What Is Working
 
@@ -45,6 +51,7 @@ This is the working status board for developers. It is intentionally short and o
 - download bundle extraction into `raw/`
 - staging into canonical per-portal FASTA files
 - BUSCO sbatch script generation
+- large real-data intake through `stage`
 
 ## Immediate Missing Work
 
@@ -54,8 +61,9 @@ This is the working status board for developers. It is intentionally short and o
 
 ### Restartability
 
-- finish propagating the new immutable snapshot model through downstream commands and docs
-- extend checksum + parameter aware skips where they matter beyond the current raw-file `md5` check
+- review `busco-slurm` against the current immutable snapshot model and update any stale path or argument assumptions
+- add regression coverage for BUSCO script writing and the optional submit path without requiring Puhti access
+- test BUSCO script writing and submission behavior on CSC/Puhti using the validated staged outputs when cluster access is available
 
 ### Maintainability
 
@@ -70,8 +78,10 @@ This is the working status board for developers. It is intentionally short and o
 
 ## Suggested Work Order
 
-1. Propagate `docs/restart_contract.md` into any remaining onboarding notes and command help where useful.
-2. Only then implement additional compute steps.
+1. Review and update `busco-slurm` to fit the current snapshot-first staging model exactly.
+2. Add regression coverage for write-only BUSCO script generation and the optional submit code path.
+3. Test BUSCO script generation and submission on CSC/Puhti using the validated staging outputs when cluster access is available.
+4. Only then implement additional compute steps.
 
 ## Definition Of “Good Enough” For The Next Milestone
 
@@ -80,3 +90,4 @@ This is the working status board for developers. It is intentionally short and o
 - failures in network batches are resumable and inspectable
 - the README and onboarding docs match the code
 - at least a minimal regression test suite exists
+- the first downstream BUSCO handoff works cleanly from a real staged snapshot

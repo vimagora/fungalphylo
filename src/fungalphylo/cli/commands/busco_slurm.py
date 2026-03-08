@@ -9,6 +9,8 @@ from typing import Optional
 import typer
 
 from fungalphylo.core.events import log_event
+from fungalphylo.core.hash import hash_json
+from fungalphylo.core.manifest import write_manifest
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.core.tools import load_tools
 from fungalphylo.db.db import connect, init_db
@@ -113,11 +115,11 @@ def busco_slurm_command(
 
     rid = run_id or f"busco_{_now_tag()}"
 
-    run_root = project_dir / "runs" / rid
+    run_root = paths.run_dir(rid)
     slurm_dir = run_root / "slurm"
     out_dir = run_root / "busco_results"
-    db_dir = project_dir / "cache" / "busco_downloads"
-    logs_dir = project_dir / "logs" / "slurm"
+    db_dir = paths.cache_dir / "busco_downloads"
+    logs_dir = paths.logs_dir / "slurm"
 
     ensure_dir(slurm_dir)
     ensure_dir(out_dir)
@@ -188,14 +190,67 @@ echo "Done."
 
     script_path.write_text(script, encoding="utf-8")
 
+    manifest_data = {
+        "run_id": rid,
+        "kind": "busco",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "staging_id": selected_staging_id,
+        "project_dir": str(project_dir),
+        "paths": {
+            "run_dir": str(run_root.relative_to(project_dir)),
+            "script_path": str(script_path.relative_to(project_dir)),
+            "results_dir": str(out_dir.relative_to(project_dir)),
+            "download_cache_dir": str(db_dir.relative_to(project_dir)),
+            "logs_dir": str(logs_dir.relative_to(project_dir)),
+        },
+        "busco": {
+            "lineage": lineage,
+            "command": busco_cmd,
+            "bin_dir": str(bin_dir),
+            "force": force,
+        },
+        "slurm": {
+            "account": acct,
+            "partition": partition,
+            "time": time,
+            "cpus": cpus,
+            "mem_per_cpu": mem_per_cpu,
+            "submit": submit,
+        },
+    }
+    manifest_path = paths.run_manifest(rid)
+    write_manifest(manifest_path, manifest_data)
+    manifest_sha256 = hash_json(manifest_data)
+
+    conn = connect(paths.db_path)
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO runs(run_id, staging_id, kind, created_at, manifest_path, manifest_sha256)
+            VALUES(?,?,?,?,?,?)
+            """,
+            (
+                rid,
+                selected_staging_id,
+                "busco",
+                manifest_data["created_at"],
+                str(manifest_path.relative_to(project_dir)),
+                manifest_sha256,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
     log_event(
         project_dir,
         {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": manifest_data["created_at"],
             "event": "slurm_busco_write",
             "run_id": rid,
             "staging_id": selected_staging_id,
             "script_path": str(script_path),
+            "manifest_path": str(manifest_path),
             "account": acct,
             "partition": partition,
             "cpus": cpus,
