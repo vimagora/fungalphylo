@@ -97,7 +97,7 @@ def interproscan_slurm_command(
     no_confirm: bool = typer.Option(False, "--no-confirm", help="Do not prompt to confirm detected account"),
     run_id: Optional[str] = typer.Option(None, "--run-id", help="Run identifier (default: interproscan_<timestamp>)"),
     application: list[str] = typer.Option(
-        ["pfam"],
+        ["PfamA"],
         "--application",
         help="InterProScan application to enable. Repeat the flag to request multiple applications.",
     ),
