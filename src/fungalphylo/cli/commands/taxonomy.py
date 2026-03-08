@@ -11,6 +11,8 @@ from typing import Any, Iterator, Optional
 import requests
 import typer
 
+from fungalphylo.core.busco import parse_batch_summary, resolve_batch_summary, resolve_portal_id
+from fungalphylo.core.manifest import read_manifest
 from fungalphylo.core.errors import exception_record, log_error_jsonl
 from fungalphylo.core.events import log_event
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
@@ -187,8 +189,76 @@ def _resolve_portal_for_busco_row(row: dict[str, Any]) -> str:
     text = str(value).strip()
     if not text:
         raise typer.BadParameter("BUSCO TSV contains an empty portal identifier.")
-    stem = Path(text).stem
-    return stem[:-4] if stem.endswith(".faa") else stem
+    return resolve_portal_id(text)
+
+
+def _load_busco_rows_from_db(paths: ProjectPaths, run_id: str) -> list[dict[str, Any]]:
+    conn = connect(paths.db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT portal_id, input_filename, lineage, complete_pct, single_pct, duplicated_pct,
+                   fragmented_pct, missing_pct, n_markers
+            FROM busco_results
+            WHERE run_id = ?
+            ORDER BY input_filename
+            """,
+            (run_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    return [
+        {
+            "portal_id": row["portal_id"],
+            "query": row["input_filename"],
+            "complete": row["complete_pct"],
+            "single": row["single_pct"],
+            "duplicated": row["duplicated_pct"],
+            "fragmented": row["fragmented_pct"],
+            "missing": row["missing_pct"],
+            "n_markers": row["n_markers"],
+            "dataset": row["lineage"],
+        }
+        for row in rows
+    ]
+
+
+def _load_busco_rows(paths: ProjectPaths, run_id: str, run_root: Path, busco_tsv: Optional[Path]) -> list[dict[str, Any]]:
+    if busco_tsv is not None:
+        resolved_busco_tsv = busco_tsv.expanduser().resolve()
+        if not resolved_busco_tsv.exists():
+            raise typer.BadParameter(f"BUSCO TSV not found: {resolved_busco_tsv}")
+        return _read_delimited_rows(resolved_busco_tsv)
+
+    db_rows = _load_busco_rows_from_db(paths, run_id)
+    if db_rows:
+        return db_rows
+
+    manifest = read_manifest(paths.run_manifest(run_id))
+    batch_summary = resolve_batch_summary(paths, run_id, manifest)
+    if batch_summary.exists():
+        parsed_rows = parse_batch_summary(batch_summary)
+        return [
+            {
+                "portal_id": row["portal_id"],
+                "query": row["input_filename"],
+                "complete": row["complete_pct"],
+                "single": row["single_pct"],
+                "duplicated": row["duplicated_pct"],
+                "fragmented": row["fragmented_pct"],
+                "missing": row["missing_pct"],
+                "n_markers": row["n_markers"],
+                "dataset": row["lineage"],
+            }
+            for row in parsed_rows
+        ]
+
+    results_dir = run_root / "busco_results"
+    resolved_busco_tsv = _find_single_tsv(results_dir)
+    if not resolved_busco_tsv.exists():
+        raise typer.BadParameter(f"BUSCO TSV not found: {resolved_busco_tsv}")
+    return _read_delimited_rows(resolved_busco_tsv)
 
 
 def _stacked_bar(row: dict[str, Any]) -> tuple[str, dict[str, float]]:
@@ -717,10 +787,6 @@ def busco_taxonomy_mockup(
     if not results_dir.exists():
         raise typer.BadParameter(f"BUSCO results dir not found for run {selected_run_id}: {results_dir}")
 
-    resolved_busco_tsv = busco_tsv.expanduser().resolve() if busco_tsv else _find_single_tsv(results_dir)
-    if not resolved_busco_tsv.exists():
-        raise typer.BadParameter(f"BUSCO TSV not found: {resolved_busco_tsv}")
-
     resolved_taxdump_dir = (
         taxdump_dir.expanduser().resolve() if taxdump_dir else paths.cache_dir / "ncbi_taxonomy" / "new_taxdump"
     )
@@ -741,9 +807,9 @@ def busco_taxonomy_mockup(
         out = out.expanduser().resolve()
         out.parent.mkdir(parents=True, exist_ok=True)
 
-    busco_rows = _read_delimited_rows(resolved_busco_tsv)
+    busco_rows = _load_busco_rows(paths, selected_run_id, run_root, busco_tsv)
     if not busco_rows:
-        raise typer.BadParameter(f"BUSCO TSV is empty: {resolved_busco_tsv}")
+        raise typer.BadParameter(f"BUSCO summary is empty for run: {selected_run_id}")
 
     names = _load_taxdump_names(names_path)
     nodes = _load_taxdump_nodes(nodes_path)
@@ -806,7 +872,7 @@ def busco_taxonomy_mockup(
             "ts": _now(),
             "event": "taxonomy_busco_mockup",
             "run_id": selected_run_id,
-            "busco_tsv": str(resolved_busco_tsv),
+            "busco_source": ("explicit_tsv" if busco_tsv is not None else "run_summary"),
             "taxdump_dir": str(resolved_taxdump_dir),
             "out": str(out),
             "n_rows": len(combined_rows),

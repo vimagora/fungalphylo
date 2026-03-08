@@ -70,6 +70,29 @@ CREATE TABLE IF NOT EXISTS runs (
   FOREIGN KEY (staging_id) REFERENCES stagings(staging_id)
 );
 
+CREATE TABLE IF NOT EXISTS busco_results (
+  run_id                 TEXT NOT NULL,
+  portal_id              TEXT NOT NULL,
+  input_filename         TEXT NOT NULL,
+  lineage                TEXT NOT NULL,
+  complete_pct           REAL NOT NULL,
+  single_pct             REAL NOT NULL,
+  duplicated_pct         REAL NOT NULL,
+  fragmented_pct         REAL NOT NULL,
+  missing_pct            REAL NOT NULL,
+  n_markers              INTEGER,
+  batch_summary_path     TEXT NOT NULL,
+  portal_result_dir      TEXT,
+  short_summary_json_path TEXT,
+  short_summary_txt_path  TEXT,
+  imported_at            TEXT NOT NULL,
+  PRIMARY KEY (run_id, portal_id),
+  FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_busco_results_run_id
+  ON busco_results(run_id);
+
 -- Legacy mutable staging table removed in favor of snapshot-scoped staging_files.
 DROP TABLE IF EXISTS staged_files;
 

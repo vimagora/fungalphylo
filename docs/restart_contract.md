@@ -9,6 +9,7 @@ Scope:
 - `download`
 - `stage`
 - `busco-slurm`
+- `busco ingest-results`
 
 Principles:
 
@@ -184,6 +185,32 @@ Rerun contract:
 Operator guidance:
 - in local development environments without Puhti access, use `busco-slurm` to write the script for review and manual transfer
 - keep the optional submit path implemented for real CSC usage, but do not make normal development or tests depend on successful `sbatch`
+- batch-mode completion is represented by `runs/<run_id>/busco_results/<batch_root>/batch_summary.txt`
+
+## `busco ingest-results`
+
+Same work:
+- a chosen BUSCO `run_id` plus its completed `batch_summary.txt`
+
+Completion proof:
+- one row per portal in SQLite `busco_results`
+- the BUSCO run manifest and batch-summary file remain on disk
+
+Partial completion:
+- some BUSCO rows may be imported and others missing if the batch summary is incomplete or the filesystem outputs are only partially present
+
+Skip behavior:
+- none; rerunning replaces existing `busco_results` rows for the same `run_id`
+
+Rerun contract:
+- this is a manual post-run import step after the operator confirms that the cluster-side BUSCO run completed successfully
+- rerunning is safe and idempotent at the run-summary level because existing rows for that `run_id` are replaced before import
+- detailed BUSCO outputs remain on disk under `runs/<run_id>/busco_results/...`; SQLite stores only the per-portal summary layer
+
+Operator guidance:
+- do not treat BUSCO import as an automatic poller or completion detector
+- first verify that the cluster-side run has produced `batch_summary.txt`
+- then run `busco ingest-results` manually
 
 ## Status Interpretation
 

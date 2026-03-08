@@ -50,6 +50,7 @@ logs/
 
 # --- Project data outputs (do NOT commit) ---
 # If you keep example projects under repo, consider putting them in /examples and removing these.
+uploads/
 raw/
 staged/
 staging/

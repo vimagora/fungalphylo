@@ -8,6 +8,7 @@ from typing import Optional
 
 import typer
 
+from fungalphylo.core.busco import batch_root_name
 from fungalphylo.core.events import log_event
 from fungalphylo.core.hash import hash_json
 from fungalphylo.core.manifest import write_manifest
@@ -127,7 +128,7 @@ def busco_slurm_command(
     ensure_dir(logs_dir)
 
     script_path = slurm_dir / "busco.sbatch"
-    run_name = f"busco_{selected_staging_id}_{rid}"
+    run_name = batch_root_name(selected_staging_id, rid)
     busco_force_flag = "-f" if force else ""
 
     script = f"""#!/bin/bash
@@ -162,9 +163,9 @@ fi
 
 THREADS="${{SLURM_CPUS_PER_TASK:-1}}"
 
-# Skip if already completed
-if ls "$OUT_DIR"/short_summary*.txt >/dev/null 2>&1; then
-  echo "BUSCO already completed in $OUT_DIR (short_summary found)."
+# Skip if already completed in batch mode
+if [ -f "$OUT_DIR/$RUN_NAME/batch_summary.txt" ]; then
+  echo "BUSCO already completed in $OUT_DIR/$RUN_NAME (batch_summary.txt found)."
   exit 0
 fi
 
@@ -200,6 +201,8 @@ echo "Done."
             "run_dir": str(run_root.relative_to(project_dir)),
             "script_path": str(script_path.relative_to(project_dir)),
             "results_dir": str(out_dir.relative_to(project_dir)),
+            "batch_root": str((out_dir / run_name).relative_to(project_dir)),
+            "batch_summary": str((out_dir / run_name / "batch_summary.txt").relative_to(project_dir)),
             "download_cache_dir": str(db_dir.relative_to(project_dir)),
             "logs_dir": str(logs_dir.relative_to(project_dir)),
         },
@@ -207,6 +210,7 @@ echo "Done."
             "lineage": lineage,
             "command": busco_cmd,
             "bin_dir": str(bin_dir),
+            "run_name": run_name,
             "force": force,
         },
         "slurm": {

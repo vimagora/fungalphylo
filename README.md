@@ -162,12 +162,13 @@ If you want a curated taxonomy mapping for later completeness-by-taxon analysis,
 fungalphylo taxonomy fetch-ncbi /path/to/project
 fungalphylo taxonomy export /path/to/project --approved-only --out review/portal_taxonomy.tsv
 fungalphylo taxonomy apply /path/to/project review/portal_taxonomy.tsv
+fungalphylo busco ingest-results /path/to/project --run-id <run_id>
 fungalphylo taxonomy busco-mockup /path/to/project --summary-rank family
 ```
 
 Use `--approved-only` with `taxonomy export` to build a template for just the approved portals. Use `--dry-run` with `taxonomy apply` to validate the table without writing. Blank `ncbi_taxon_id` values clear an existing assignment by default.
 
-`taxonomy busco-mockup` reads the latest BUSCO run by default, expects a single summary TSV under `runs/<run_id>/busco_results/`, resolves lineage from the downloaded NCBI taxdump, and writes an HTML taxonomy-ordered QC report under `runs/<run_id>/reports/`. It supports `--summary-rank family|order` and highlights low-quality taxa below `--low-quality-threshold` (default `85`).
+After a BUSCO run finishes, import its `batch_summary.txt` into SQLite with `busco ingest-results`. `taxonomy busco-mockup` reads the latest BUSCO run by default and resolves BUSCO summaries from, in order: an explicit `--busco-tsv`, imported `busco_results` rows, the BUSCO batch summary under `runs/<run_id>/busco_results/<batch_root>/batch_summary.txt`, and finally the older single-TSV fallback. It writes an HTML taxonomy-ordered QC report under `runs/<run_id>/reports/`, supports `--summary-rank family|order`, and highlights low-quality taxa below `--low-quality-threshold` (default `85`).
 
 ### 6) Request restore (can take hours/days)
 
@@ -282,6 +283,23 @@ If `--staging-id` is omitted, the latest staging snapshot is used.
 Use `--submit` only on systems that actually have `sbatch` access. In local development, the intended workflow is to write the SLURM script, review it, and submit it later on Puhti.
 
 Each BUSCO script generation also writes `runs/<run_id>/manifest.json` and records a `runs` row in SQLite.
+
+Batch-mode BUSCO output is expected under:
+
+```text
+runs/<run_id>/busco_results/busco_<staging_id>_<run_id>/
+  batch_summary.txt
+  <portal_id>.faa/
+  ...
+```
+
+`busco-slurm` does not import results automatically. After you verify that the BUSCO run completed successfully on Puhti, import the batch summary manually:
+
+```bash
+fungalphylo busco ingest-results /path/to/project --run-id <run_id>
+```
+
+This stores one summary row per portal in SQLite `busco_results` while keeping the detailed BUSCO outputs on disk under `runs/<run_id>/busco_results/`.
 
 For InterProScan on Puhti / SLURM:
 

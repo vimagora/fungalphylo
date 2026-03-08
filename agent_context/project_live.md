@@ -6,6 +6,7 @@ This is the working status board for developers. It is intentionally short and o
 
 - Intake workflow is implemented through `stage`.
 - BUSCO SLURM script generation exists.
+- BUSCO batch-summary import into SQLite exists via `busco ingest-results`.
 - OrthoFinder/species-tree/family compute runs are not implemented.
 - The current pytest suite covers staging snapshots, cache-ingest behavior, autoselect scoring/config behavior, db read-only enforcement, FASTA roundtrips, ID map loading, and raw path resolution.
 - Code compiles with `python -m compileall src`.
@@ -20,6 +21,8 @@ This is the working status board for developers. It is intentionally short and o
 - `busco-slurm` can target a chosen `staging_id` and defaults to the latest snapshot.
 - local development should only write SLURM scripts for review; optional submit paths should remain implemented but are not expected to be exercised without Puhti access
 - `busco-slurm` now writes `runs/<run_id>/manifest.json` and records a `runs` row when it generates a script.
+- `busco-slurm` now records the expected BUSCO batch root and `batch_summary.txt` path in the run manifest and uses `batch_summary.txt` as the batch-mode completion signal.
+- `busco ingest-results` now imports BUSCO `batch_summary.txt` into SQLite `busco_results` as a manual post-run step after the user verifies completion.
 - `interproscan-slurm` now writes a launcher script, worker script, per-proteome queue ledger, `runs/<run_id>/manifest.json`, and a `runs` row for launcher-based InterProScan execution on staged proteomes.
 - the next InterProScan step is to replace the current synchronous launcher scaffold with a real submit-and-poll controller that records child Slurm job IDs and advances the queue only after the previous proteome finishes.
 - the broken duplicate path helper in `src/fungalphylo/core/paths.py` was removed.
@@ -32,6 +35,7 @@ This is the working status board for developers. It is intentionally short and o
 - `taxonomy apply` now updates first-class `portals.ncbi_taxon_id` values from a TSV/CSV/XLSX table, with regression tests and migration coverage for existing databases.
 - `taxonomy fetch-ncbi` now downloads and extracts the NCBI `new_taxdump` archive into the project cache.
 - `taxonomy busco-mockup` now renders a taxonomy-ordered HTML BUSCO QC report from the latest BUSCO run and local taxdump data.
+- `taxonomy busco-mockup` now prefers imported `busco_results` rows or a BUSCO `batch_summary.txt` file over the older single-TSV assumption.
 - `restore --dry-run` and `download --dry-run` no longer require JGI authentication when only building payloads.
 - `download` now safely writes `unmatched_manifest.tsv` even when the target directory does not already exist.
 - restore/download request batches are now indexed in SQLite via `restore_requests` and `download_requests`, and `status` reads from that ledger.
@@ -56,6 +60,7 @@ This is the working status board for developers. It is intentionally short and o
 - download bundle extraction into `raw/`
 - staging into canonical per-portal FASTA files
 - BUSCO sbatch script generation
+- BUSCO batch summary import and taxonomy mockup generation
 - InterProScan launcher/worker/queue script generation
 - large real-data intake through `stage`
 
@@ -67,9 +72,7 @@ This is the working status board for developers. It is intentionally short and o
 
 ### Restartability
 
-- review `busco-slurm` against the current immutable snapshot model and update any stale path or argument assumptions
-- add regression coverage for BUSCO script writing and the optional submit path without requiring Puhti access
-- test BUSCO script writing and submission behavior on CSC/Puhti using the validated staged outputs when cluster access is available
+- validate the manual BUSCO result-import workflow on CSC/Puhti using the validated staged outputs when cluster access is available
 - test InterProScan launcher behavior on Puhti with real `cluster_interproscan` output and verify that one-proteome-at-a-time queueing avoids scheduler limit issues
 - upgrade `interproscan-slurm` so the launcher submits one child job at a time, records the exact job ID in the queue ledger, polls that job specifically, and only then advances to the next proteome
 
@@ -86,9 +89,9 @@ This is the working status board for developers. It is intentionally short and o
 
 ## Suggested Work Order
 
-1. Review and update `busco-slurm` to fit the current snapshot-first staging model exactly.
-2. Add regression coverage for write-only BUSCO script generation and the optional submit code path.
-3. Test BUSCO script generation and submission on CSC/Puhti using the validated staging outputs when cluster access is available.
+1. Validate BUSCO script generation, cluster completion, and manual `busco ingest-results` on CSC/Puhti using validated staging outputs.
+2. Upgrade `interproscan-slurm` from the current write-first scaffold to a real submit-and-poll controller with child job IDs.
+3. Test the upgraded InterProScan queue controller on Puhti with real `cluster_interproscan` output.
 4. Only then implement additional compute steps.
 
 ## Definition Of “Good Enough” For The Next Milestone
@@ -98,4 +101,4 @@ This is the working status board for developers. It is intentionally short and o
 - failures in network batches are resumable and inspectable
 - the README and onboarding docs match the code
 - at least a minimal regression test suite exists
-- the first downstream BUSCO handoff works cleanly from a real staged snapshot
+- the first downstream BUSCO handoff, including manual result import, works cleanly from a real staged snapshot

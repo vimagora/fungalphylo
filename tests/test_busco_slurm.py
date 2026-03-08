@@ -107,6 +107,8 @@ def test_busco_slurm_writes_script_for_latest_staging_without_submitting(tmp_pat
     assert manifest["kind"] == "busco"
     assert manifest["staging_id"] == "staging_new"
     assert manifest["paths"]["script_path"] == "runs/busco_test/slurm/busco.sbatch"
+    assert manifest["paths"]["batch_root"] == "runs/busco_test/busco_results/busco_staging_new_busco_test"
+    assert manifest["paths"]["batch_summary"] == "runs/busco_test/busco_results/busco_staging_new_busco_test/batch_summary.txt"
     assert manifest["slurm"]["submit"] is False
 
     conn = connect(paths.db_path)

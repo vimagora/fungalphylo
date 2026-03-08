@@ -108,6 +108,8 @@ def _seed_busco_run(paths: ProjectPaths, run_id: str, staging_id: str = "staging
     run_dir = paths.run_dir(run_id)
     results_dir = run_dir / "busco_results"
     results_dir.mkdir(parents=True, exist_ok=True)
+    batch_root = results_dir / f"busco_{staging_id}_{run_id}"
+    batch_root.mkdir(parents=True, exist_ok=True)
     manifest_path = paths.run_manifest(run_id)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(
@@ -117,7 +119,11 @@ def _seed_busco_run(paths: ProjectPaths, run_id: str, staging_id: str = "staging
                 "kind": "busco",
                 "created_at": _now(),
                 "staging_id": staging_id,
-                "paths": {"results_dir": str(results_dir.relative_to(paths.root))},
+                "paths": {
+                    "results_dir": str(results_dir.relative_to(paths.root)),
+                    "batch_root": str(batch_root.relative_to(paths.root)),
+                    "batch_summary": str((batch_root / "batch_summary.txt").relative_to(paths.root)),
+                },
             },
             indent=2,
         )
@@ -145,7 +151,7 @@ def _seed_busco_run(paths: ProjectPaths, run_id: str, staging_id: str = "staging
         conn.commit()
     finally:
         conn.close()
-    return results_dir
+    return batch_root
 
 
 def test_taxonomy_export_writes_all_portals_by_default(tmp_path: Path) -> None:
@@ -272,15 +278,16 @@ def test_taxonomy_busco_mockup_uses_latest_run_and_writes_html(tmp_path: Path) -
     )
 
     older_results = _seed_busco_run(paths, "busco_old")
-    (older_results / "summary.tsv").write_text(
-        "query\tcomplete\tsingle\tfragmented\tduplicated\tmissing\nPortalA\t85\t80\t10\t5\t5\n",
+    (older_results / "batch_summary.txt").write_text(
+        "Input_file\tDataset\tComplete\tSingle\tDuplicated\tFragmented\tMissing\tn_markers\n"
+        "PortalA.faa\tfungi_odb12\t85\t80\t5\t10\t5\t1122\n",
         encoding="utf-8",
     )
     latest_results = _seed_busco_run(paths, "busco_latest")
-    (latest_results / "summary.tsv").write_text(
-        "query\tcomplete\tsingle\tfragmented\tduplicated\tmissing\n"
-        "PortalA\t85\t80\t10\t5\t5\n"
-        "PortalB\t80\t70\t10\t10\t10\n",
+    (latest_results / "batch_summary.txt").write_text(
+        "Input_file\tDataset\tComplete\tSingle\tDuplicated\tFragmented\tMissing\tn_markers\n"
+        "PortalA.faa\tfungi_odb12\t85\t80\t5\t10\t5\t1122\n"
+        "PortalB.faa\tfungi_odb12\t80\t70\t10\t10\t10\t1122\n",
         encoding="utf-8",
     )
 
@@ -298,6 +305,66 @@ def test_taxonomy_busco_mockup_uses_latest_run_and_writes_html(tmp_path: Path) -
     assert "Family Summary" in text
     assert "C 80.0%" in text
     assert "low-quality" in text
+
+
+def test_busco_ingest_results_stores_batch_summary_rows_and_taxonomy_mockup_uses_db(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+    _insert_portal(paths, "PortalA", 561)
+
+    taxdump_dir = project_dir / "cache" / "ncbi_taxonomy" / "new_taxdump"
+    taxdump_dir.mkdir(parents=True, exist_ok=True)
+    (taxdump_dir / "names.dmp").write_text(
+        "1\t|\troot\t|\t\t|\tscientific name\t|\n"
+        "500\t|\tAspergillus\t|\t\t|\tscientific name\t|\n"
+        "561\t|\tAspergillus fumigatus\t|\t\t|\tscientific name\t|\n",
+        encoding="utf-8",
+    )
+    (taxdump_dir / "nodes.dmp").write_text(
+        "1\t|\t1\t|\tno rank\t|\n"
+        "500\t|\t1\t|\tgenus\t|\n"
+        "561\t|\t500\t|\tspecies\t|\n",
+        encoding="utf-8",
+    )
+
+    batch_root = _seed_busco_run(paths, "busco_latest")
+    portal_dir = batch_root / "PortalA.faa"
+    portal_dir.mkdir(parents=True, exist_ok=True)
+    (batch_root / "batch_summary.txt").write_text(
+        "Input_file\tDataset\tComplete\tSingle\tDuplicated\tFragmented\tMissing\tn_markers\n"
+        "PortalA.faa\tfungi_odb12\t95\t90\t5\t3\t2\t1122\n",
+        encoding="utf-8",
+    )
+    (portal_dir / "short_summary.specific.fungi_odb12.PortalA.faa.json").write_text("{}", encoding="utf-8")
+    (portal_dir / "short_summary.specific.fungi_odb12.PortalA.faa.txt").write_text("summary", encoding="utf-8")
+
+    ingest_result = runner.invoke(app, ["busco", "ingest-results", "--run-id", "busco_latest", str(project_dir)])
+    assert ingest_result.exit_code == 0, ingest_result.output
+    assert "Ingested 1 BUSCO summary rows" in ingest_result.output
+
+    conn = connect(paths.db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT portal_id, lineage, complete_pct, short_summary_json_path
+            FROM busco_results
+            WHERE run_id = ?
+            """,
+            ("busco_latest",),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row["portal_id"] == "PortalA"
+    assert row["lineage"] == "fungi_odb12"
+    assert row["complete_pct"] == 95.0
+    assert row["short_summary_json_path"].endswith("PortalA.faa/short_summary.specific.fungi_odb12.PortalA.faa.json")
+
+    mockup_result = runner.invoke(app, ["taxonomy", "busco-mockup", "--run-id", "busco_latest", str(project_dir)])
+    assert mockup_result.exit_code == 0, mockup_result.output
+    html = (project_dir / "runs" / "busco_latest" / "reports" / "taxonomy_busco_mockup.html").read_text(encoding="utf-8")
+    assert "PortalA" in html
+    assert "Aspergillus fumigatus" in html
 
 
 def test_taxonomy_apply_updates_ncbi_taxon_ids(tmp_path: Path) -> None:

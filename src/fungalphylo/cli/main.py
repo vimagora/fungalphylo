@@ -10,6 +10,7 @@ from fungalphylo.cli.commands import review as review_cmd
 from fungalphylo.cli.commands import restore as restore_cmd
 from fungalphylo.cli.commands import download as download_cmd
 from fungalphylo.cli.commands import stage as stage_cmd
+from fungalphylo.cli.commands import busco as busco_cmd
 from fungalphylo.cli.commands import busco_slurm as busco_slurm_cmd
 from fungalphylo.cli.commands import interproscan_slurm as interproscan_slurm_cmd
 
@@ -34,6 +35,7 @@ app.add_typer(review_cmd.app, name="review")
 app.add_typer(restore_cmd.app, name="restore")
 app.add_typer(download_cmd.app, name="download")
 app.add_typer(stage_cmd.app, name="stage")
+app.add_typer(busco_cmd.app, name="busco")
 app.add_typer(busco_slurm_cmd.app, name="busco-slurm")
 app.add_typer(interproscan_slurm_cmd.app, name="interproscan-slurm")
 
