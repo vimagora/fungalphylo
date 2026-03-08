@@ -36,29 +36,6 @@ def _safe_name(text: str) -> str:
     return SAFE_ID_RE.sub("_", text)[:200] or "proteome"
 
 
-def _parse_mem_to_megabytes(value: str) -> int:
-    text = value.strip().upper()
-    if not text:
-        raise ValueError("memory value is empty")
-    suffixes = {
-        "K": 1 / 1024,
-        "M": 1,
-        "G": 1024,
-        "T": 1024 * 1024,
-    }
-    suffix = text[-1]
-    if suffix.isalpha():
-        if suffix not in suffixes:
-            raise ValueError(f"unsupported memory suffix: {value}")
-        number = float(text[:-1])
-        return int(number * suffixes[suffix])
-    return int(float(text))
-
-
-def _max_mem_value(left: str, right: str) -> str:
-    return left if _parse_mem_to_megabytes(left) >= _parse_mem_to_megabytes(right) else right
-
-
 def _write_queue_tsv(path: Path, rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as f:
@@ -107,7 +84,7 @@ def interproscan_slurm_command(
     fmt: list[str] = typer.Option(
         ["TSV"],
         "--format",
-        help="InterProScan output format. Repeat the flag to request multiple formats.",
+        help="InterProScan output format. For the Puhti cluster_interproscan wrapper, only TSV is currently supported.",
     ),
     partition: str = typer.Option("small", "--partition", help="SLURM partition for the launcher job"),
     time: str = typer.Option("48:00:00", "--time", help="SLURM time limit for the launcher job"),
@@ -177,17 +154,24 @@ def interproscan_slurm_command(
     applications = list(dict.fromkeys([a.strip() for a in application if a.strip()]))
     if not applications:
         applications = ["PfamA"]
-    formats = list(dict.fromkeys([f.strip() for f in fmt if f.strip()]))
+    format_aliases = {"tsv": "TSV", "xml": "XML", "gff3": "GFF3"}
+    formats = []
+    for raw_format in fmt:
+        value = raw_format.strip()
+        if not value:
+            continue
+        formats.append(format_aliases.get(value.lower(), value))
+    formats = list(dict.fromkeys(formats))
     if not formats:
         formats = ["TSV"]
-    if "TSV" not in formats:
-        raise typer.BadParameter("At least one InterProScan output format must be 'TSV' for downstream parsing.")
+    if len(formats) != 1 or formats[0] != "TSV":
+        raise typer.BadParameter(
+            "Puhti cluster_interproscan currently supports only a single explicit TSV output for this command."
+        )
     effective_worker_partition = worker_partition or partition
     effective_worker_time = worker_time or time
     effective_worker_cpus = worker_cpus or cpus
     effective_worker_mem = worker_mem or mem
-    if "gff3" in {f.lower() for f in formats}:
-        effective_worker_mem = _max_mem_value(effective_worker_mem, "4G")
 
     rid = run_id or f"interproscan_{_now_tag()}"
     run_root = paths.run_dir(rid)
@@ -237,6 +221,7 @@ set -euo pipefail
 PORTAL_ID="${{PORTAL_ID:?missing PORTAL_ID}}"
 INPUT_FASTA="${{INPUT_FASTA:?missing INPUT_FASTA}}"
 RESULT_DIR="${{RESULT_DIR:?missing RESULT_DIR}}"
+OUTPUT_TSV="${{OUTPUT_TSV:?missing OUTPUT_TSV}}"
 WORK_DIR="${{WORK_DIR:?missing WORK_DIR}}"
 IPR_CMD="${{IPR_CMD:?missing IPR_CMD}}"
 
@@ -260,7 +245,7 @@ fi
 
 "$IPR_CMD" \\
   -i "$INPUT_FASTA" \\
-  -d "$RESULT_DIR" \\
+  -o "$OUTPUT_TSV" \\
   -T "$WORK_DIR/$PORTAL_ID" \\
   {app_args} \\
   {fmt_args}
@@ -381,6 +366,7 @@ def submit_row(row: dict[str, str]) -> str:
             f"PORTAL_ID={{portal_id}}",
             f"INPUT_FASTA={{row['input_fasta']}}",
             f"RESULT_DIR={{row['results_dir']}}",
+            f"OUTPUT_TSV={{row['tsv_path']}}",
             f"WORK_DIR={{WORK_DIR}}",
             f"IPR_CMD={{IPR_CMD}}",
         ]

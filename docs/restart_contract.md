@@ -229,7 +229,7 @@ Rerun contract:
 - always safe to rerun
 - operational identity comes from the referenced `staging_id` and `run_id`, not from mutable staged paths
 - `--limit` intentionally changes the queued proteome set for debug-sized runs
-- when `gff3` output is requested, the generated worker job enforces a minimum memory request of `4G`
+- for the current Puhti `cluster_interproscan` wrapper path, the generated worker uses one explicit `-o` output file and therefore supports only a single `TSV` format
 
 Operator guidance:
 - the launcher now runs a submit-and-poll controller that submits one worker at a time with `sbatch --parsable`, records the child job ID in `queue.tsv`, polls that exact job with `squeue`/`sacct`, and only then advances

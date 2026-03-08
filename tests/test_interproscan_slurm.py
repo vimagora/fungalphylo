@@ -120,7 +120,7 @@ def test_interproscan_slurm_writes_launcher_worker_queue_and_manifest(tmp_path: 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["kind"] == "interproscan"
     assert manifest["interproscan"]["applications"] == ["pfam", "panther"]
-    assert manifest["interproscan"]["formats"] == ["tsv"]
+    assert manifest["interproscan"]["formats"] == ["TSV"]
     assert manifest["interproscan"]["controller_mode"] == "submit_and_poll"
     assert manifest["slurm"]["submit"] is False
 
@@ -129,19 +129,24 @@ def test_interproscan_slurm_writes_launcher_worker_queue_and_manifest(tmp_path: 
     controller_text = controller.read_text(encoding="utf-8")
     assert "module load biokit" in worker_text
     assert "module load interproscan" in worker_text
-    assert "--applications 'pfam'" in worker_text
-    assert "--applications 'panther'" in worker_text
-    assert "--formats 'tsv'" in worker_text
+    assert 'OUTPUT_TSV="${OUTPUT_TSV:?missing OUTPUT_TSV}"' in worker_text
+    assert "-appl 'pfam'" in worker_text
+    assert "-appl 'panther'" in worker_text
+    assert '-f \'TSV\'' in worker_text
+    assert '-o "$OUTPUT_TSV"' in worker_text
     assert "#SBATCH --partition=small" in worker_text
     assert f'python3 "{controller.as_posix()}"' in launcher_text
     assert '"sbatch",' in controller_text
     assert '"sacct", "-n", "-P"' in controller_text
     assert '"squeue", "-h", "-j"' in controller_text
+    assert 'f"OUTPUT_TSV={row[\'tsv_path\']}"' in controller_text
 
     with queue.open("r", encoding="utf-8", newline="") as f:
         rows = list(csv.DictReader(f, delimiter="\t"))
     assert [row["portal_id"] for row in rows] == ["PortalA", "PortalB"]
     assert all(row["status"] == "pending" for row in rows)
+    assert rows[0]["tsv_path"].endswith("/PortalA/PortalA.tsv")
+    assert rows[1]["tsv_path"].endswith("/PortalB/PortalB.tsv")
 
 
 def test_interproscan_slurm_submit_path_is_mockable(tmp_path: Path, monkeypatch) -> None:
@@ -296,7 +301,7 @@ def test_interproscan_slurm_does_not_require_bin_dir_when_modules_are_used(tmp_p
     assert manifest["interproscan"]["module_loads"] == ["biokit", "interproscan"]
 
 
-def test_interproscan_slurm_enforces_minimum_worker_mem_for_gff3(tmp_path: Path) -> None:
+def test_interproscan_slurm_rejects_non_tsv_formats_for_puhti_wrapper(tmp_path: Path) -> None:
     project_dir = tmp_path / "project"
     paths = _init_project(project_dir)
     _seed_staging(paths, "staging1")
@@ -317,18 +322,13 @@ def test_interproscan_slurm_enforces_minimum_worker_mem_for_gff3(tmp_path: Path)
             "tsv",
             "--format",
             "gff3",
-            "--worker-mem",
-            "1G",
             str(project_dir),
         ],
     )
 
-    assert result.exit_code == 0, result.output
-    worker = project_dir / "runs" / "ipr_gff3" / "slurm" / "interproscan_worker.sbatch"
-    manifest = json.loads((project_dir / "runs" / "ipr_gff3" / "manifest.json").read_text(encoding="utf-8"))
-    worker_text = worker.read_text(encoding="utf-8")
-    assert "#SBATCH --mem=4G" in worker_text
-    assert manifest["slurm"]["worker_mem"] == "4G"
+    assert result.exit_code != 0
+    assert "supports only" in result.output
+    assert "TSV" in result.output
 
 
 def test_interproscan_slurm_requires_existing_staging_dir(tmp_path: Path) -> None:

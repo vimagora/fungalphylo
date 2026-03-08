@@ -73,7 +73,7 @@ The main risks are not scale-related. They are semantic drift and incomplete res
 - `interproscan-slurm` now writes a launcher script, worker sbatch script, controller script, per-proteome queue ledger, run manifest, and `runs` ledger row for launcher-based InterProScan execution on staged proteomes.
 - `interproscan-slurm` now uses a true submit-and-poll controller that records child job IDs in `queue.tsv` and advances one proteome at a time.
 - `interproscan-slurm` now loads Puhti modules (`biokit`, `interproscan`) inside the worker job before running `cluster_interproscan`; `interproscan.bin_dir` is optional.
-- `interproscan-slurm` now supports `--limit` for debug-sized runs and enforces a `4G` minimum worker memory floor when `gff3` output is requested.
+- `interproscan-slurm` now supports `--limit` for debug-sized runs and, on the current Puhti wrapper path, constrains output to a single explicit `TSV` file per proteome.
 - In this local development environment, compute commands should default to writing SLURM scripts only; keep explicit submit support in code, but do not rely on live Puhti submission during development or tests.
 - `autoselect` now honors config-driven scoring weights and configurable ban patterns.
 - `db` now enforces read-only SQL and opens SQLite in read-only mode.

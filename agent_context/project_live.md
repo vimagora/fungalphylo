@@ -27,7 +27,7 @@ This is the working status board for developers. It is intentionally short and o
 - `interproscan-slurm` now uses a true submit-and-poll controller: the launcher runs a controller script, the controller submits one worker job at a time with `sbatch --parsable`, records the child job ID in `queue.tsv`, polls that exact job via `squeue`/`sacct`, and only then advances to the next proteome.
 - the generated InterProScan worker job now loads Puhti modules with `module load biokit` and `module load interproscan`; `interproscan.bin_dir` is optional and only prepended to `PATH` if explicitly configured.
 - `interproscan-slurm` now supports `--limit` to include only the first `N` staged proteomes in the queue for debugging.
-- `interproscan-slurm` now enforces a minimum worker memory of `4G` when `gff3` output is requested.
+- `interproscan-slurm` now constrains the current Puhti wrapper path to a single explicit `TSV` output file per proteome.
 - the broken duplicate path helper in `src/fungalphylo/core/paths.py` was removed.
 - README has been updated to the snapshot-first model.
 - `fetch-index --ingest-from-cache` no longer requires JGI authentication.
@@ -77,7 +77,7 @@ This is the working status board for developers. It is intentionally short and o
 
 - validate the manual BUSCO result-import workflow on CSC/Puhti using the validated staged outputs when cluster access is available
 - test the upgraded InterProScan controller on Puhti with real `cluster_interproscan` output and verify that one-proteome-at-a-time queueing avoids scheduler limit issues
-- confirm the generated module-load path (`biokit`, `interproscan`) and worker-resource defaults on Puhti, especially the GFF3 `4G` memory floor
+- confirm the generated module-load path (`biokit`, `interproscan`) and the TSV-only output contract on Puhti
 
 ### Maintainability
 

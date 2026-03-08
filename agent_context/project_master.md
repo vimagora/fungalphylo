@@ -307,6 +307,7 @@ The current code is broadly compatible with Puhti-style usage:
 - SQLite is appropriate for single-user or low-contention workflows
 - SLURM integration begins with `busco-slurm`
 - InterProScan should use a launcher/controller over staged proteomes rather than parallel outer-job submission, because CSC's `cluster_interproscan` already submits cluster work internally
+- on the current Puhti wrapper path, treat InterProScan output as one explicit `TSV` file per proteome rather than a multi-format output directory
 - the preferred InterProScan controller design is submit-and-poll: the launcher submits one proteome worker, records the returned child job ID, polls that specific job, and launches the next proteome only after completion
 - that InterProScan controller design is now implemented locally; the remaining work is operational validation on Puhti, especially around `squeue`/`sacct` polling, module loading, and worker-resource defaults
 - logs and manifests are lightweight
@@ -325,7 +326,7 @@ These are the most important short-term tasks.
 
 1. Test BUSCO script generation and submission on CSC/Puhti from a validated `staging_id` when cluster access is available.
 2. Test InterProScan launcher behavior on Puhti with real `cluster_interproscan` output and verify the queueing model against scheduler limits.
-3. Confirm the Puhti module-load path and worker-resource defaults in practice, including `--limit` debug runs and the GFF3 `4G` memory floor.
+3. Confirm the Puhti module-load path and TSV output behavior in practice, including `--limit` debug runs.
 4. Keep the documented command surface limited to implemented workflow steps until new compute commands actually exist.
 
 ## 10. Practical Guidance For New Developers

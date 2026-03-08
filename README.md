@@ -307,13 +307,13 @@ For InterProScan on Puhti / SLURM:
 fungalphylo interproscan-slurm /path/to/project --staging-id <staging_id> --application pfam
 ```
 
-Repeat `--application` to request multiple InterProScan databases. The default application is `pfam`. Repeat `--format` to request multiple output formats; the default is `tsv`, and `tsv` is currently required for downstream parsing.
+Repeat `--application` to request multiple InterProScan databases. The default application is `PfamA`. For the current Puhti `cluster_interproscan` wrapper path, `--format` is restricted to a single `TSV` output because the wrapper expects one explicit `-o` output file and one `-f` format.
 
 The command writes a launcher script, a worker sbatch script, a controller script, a per-proteome queue ledger, and a run manifest under `runs/<run_id>/`. The launcher now runs a submit-and-poll controller that submits one worker job at a time with `sbatch --parsable`, records the returned child job ID in `queue.tsv`, polls that exact job via `squeue`/`sacct`, and only then advances to the next proteome. This avoids exhausting concurrent-job limits on Puhti when `cluster_interproscan` submits cluster work internally.
 
 The generated worker job loads the Puhti modules `biokit` and `interproscan` before running `cluster_interproscan`. `interproscan.bin_dir` is optional and only prepended to `PATH` if you explicitly configure it.
 
-Use `--limit N` to include only the first `N` staged proteomes in the queue for debugging. If `gff3` output is requested, the worker job enforces a minimum memory request of `4G`.
+Use `--limit N` to include only the first `N` staged proteomes in the queue for debugging.
 
 Use `--submit` only on systems that actually have `sbatch` access. In local development, the intended workflow is to write the scripts, review them, and submit them later on Puhti.
 
