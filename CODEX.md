@@ -70,8 +70,10 @@ The main risks are not scale-related. They are semantic drift and incomplete res
 - `busco-slurm` now writes a run manifest under `runs/<run_id>/manifest.json` and records a `runs` ledger row when generating the SLURM script.
 - `busco-slurm` now records the expected BUSCO batch root and `batch_summary.txt` path in the run manifest and uses `batch_summary.txt` as the batch-mode completion signal.
 - `busco ingest-results` now imports BUSCO `batch_summary.txt` rows into SQLite `busco_results`; this is a manual post-run step after the user confirms the cluster job completed successfully.
-- `interproscan-slurm` now writes a launcher script, worker script, per-proteome queue ledger, run manifest, and `runs` ledger row for launcher-based InterProScan execution on staged proteomes.
-- the current `interproscan-slurm` implementation is intentionally only a write-first scaffold; before real Puhti use it should be upgraded to a true submit-and-poll controller that records child job IDs and advances one proteome at a time.
+- `interproscan-slurm` now writes a launcher script, worker sbatch script, controller script, per-proteome queue ledger, run manifest, and `runs` ledger row for launcher-based InterProScan execution on staged proteomes.
+- `interproscan-slurm` now uses a true submit-and-poll controller that records child job IDs in `queue.tsv` and advances one proteome at a time.
+- `interproscan-slurm` now loads Puhti modules (`biokit`, `interproscan`) inside the worker job before running `cluster_interproscan`; `interproscan.bin_dir` is optional.
+- `interproscan-slurm` now supports `--limit` for debug-sized runs and enforces a `4G` minimum worker memory floor when `gff3` output is requested.
 - In this local development environment, compute commands should default to writing SLURM scripts only; keep explicit submit support in code, but do not rely on live Puhti submission during development or tests.
 - `autoselect` now honors config-driven scoring weights and configurable ban patterns.
 - `db` now enforces read-only SQL and opens SQLite in read-only mode.
@@ -115,7 +117,7 @@ The active implementation work is to make every relevant command and document ho
 - restore/download are now batch-tracked in SQLite, but the remote-side lifecycle is still not modeled beyond local batch outcomes
 - `download` now verifies raw-file `md5` when source metadata provides it, but staged-snapshot skips are still source-file-ID based
 - the explicit restart contract now lives in `docs/restart_contract.md`; keep that file aligned with command behavior
-- the next practical milestone is to validate the manual BUSCO result-import workflow on CSC/Puhti and then complete the InterProScan controller upgrade
+- the next practical milestone is to validate the manual BUSCO result-import workflow and the upgraded InterProScan controller on CSC/Puhti
 
 ## Working Principles For Changes
 

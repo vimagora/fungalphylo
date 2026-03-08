@@ -36,6 +36,29 @@ def _safe_name(text: str) -> str:
     return SAFE_ID_RE.sub("_", text)[:200] or "proteome"
 
 
+def _parse_mem_to_megabytes(value: str) -> int:
+    text = value.strip().upper()
+    if not text:
+        raise ValueError("memory value is empty")
+    suffixes = {
+        "K": 1 / 1024,
+        "M": 1,
+        "G": 1024,
+        "T": 1024 * 1024,
+    }
+    suffix = text[-1]
+    if suffix.isalpha():
+        if suffix not in suffixes:
+            raise ValueError(f"unsupported memory suffix: {value}")
+        number = float(text[:-1])
+        return int(number * suffixes[suffix])
+    return int(float(text))
+
+
+def _max_mem_value(left: str, right: str) -> str:
+    return left if _parse_mem_to_megabytes(left) >= _parse_mem_to_megabytes(right) else right
+
+
 def _write_queue_tsv(path: Path, rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as f:
@@ -153,16 +176,18 @@ def interproscan_slurm_command(
 
     applications = list(dict.fromkeys([a.strip() for a in application if a.strip()]))
     if not applications:
-        applications = ["pfam"]
+        applications = ["PfamA"]
     formats = list(dict.fromkeys([f.strip() for f in fmt if f.strip()]))
     if not formats:
-        formats = ["tsv"]
-    if "tsv" not in formats:
-        raise typer.BadParameter("At least one InterProScan output format must be 'tsv' for downstream parsing.")
+        formats = ["TSV"]
+    if "TSV" not in formats:
+        raise typer.BadParameter("At least one InterProScan output format must be 'TSV' for downstream parsing.")
     effective_worker_partition = worker_partition or partition
     effective_worker_time = worker_time or time
     effective_worker_cpus = worker_cpus or cpus
     effective_worker_mem = worker_mem or mem
+    if "gff3" in {f.lower() for f in formats}:
+        effective_worker_mem = _max_mem_value(effective_worker_mem, "4G")
 
     rid = run_id or f"interproscan_{_now_tag()}"
     run_root = paths.run_dir(rid)
@@ -197,8 +222,8 @@ def interproscan_slurm_command(
         )
     _write_queue_tsv(queue_path, queue_rows)
 
-    app_args = " ".join(f"--applications {shlex_quote(a)}" for a in applications)
-    fmt_args = " ".join(f"--formats {shlex_quote(f)}" for f in formats)
+    app_args = " ".join(f"-appl {shlex_quote(a)}" for a in applications)
+    fmt_args = " ".join(f"-f {shlex_quote(f)}" for f in formats)
 
     worker_script = f"""#!/bin/bash
 #SBATCH --account={acct}
@@ -234,9 +259,9 @@ if ! command -v "$IPR_CMD" >/dev/null 2>&1; then
 fi
 
 "$IPR_CMD" \\
-  --input "$INPUT_FASTA" \\
-  --output-dir "$RESULT_DIR" \\
-  --tempdir "$WORK_DIR/$PORTAL_ID" \\
+  -i "$INPUT_FASTA" \\
+  -d "$RESULT_DIR" \\
+  -T "$WORK_DIR/$PORTAL_ID" \\
   {app_args} \\
   {fmt_args}
 """

@@ -296,6 +296,41 @@ def test_interproscan_slurm_does_not_require_bin_dir_when_modules_are_used(tmp_p
     assert manifest["interproscan"]["module_loads"] == ["biokit", "interproscan"]
 
 
+def test_interproscan_slurm_enforces_minimum_worker_mem_for_gff3(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+    _seed_staging(paths, "staging1")
+
+    _write_tools_yaml_optional(paths, "", "cluster_interproscan")
+
+    result = runner.invoke(
+        app,
+        [
+            "interproscan-slurm",
+            "--account",
+            "project_1234567",
+            "--staging-id",
+            "staging1",
+            "--run-id",
+            "ipr_gff3",
+            "--format",
+            "tsv",
+            "--format",
+            "gff3",
+            "--worker-mem",
+            "1G",
+            str(project_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    worker = project_dir / "runs" / "ipr_gff3" / "slurm" / "interproscan_worker.sbatch"
+    manifest = json.loads((project_dir / "runs" / "ipr_gff3" / "manifest.json").read_text(encoding="utf-8"))
+    worker_text = worker.read_text(encoding="utf-8")
+    assert "#SBATCH --mem=4G" in worker_text
+    assert manifest["slurm"]["worker_mem"] == "4G"
+
+
 def test_interproscan_slurm_requires_existing_staging_dir(tmp_path: Path) -> None:
     project_dir = tmp_path / "project"
     paths = _init_project(project_dir)

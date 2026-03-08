@@ -212,6 +212,30 @@ Operator guidance:
 - first verify that the cluster-side run has produced `batch_summary.txt`
 - then run `busco ingest-results` manually
 
+## `interproscan-slurm`
+
+Same work:
+- a chosen `staging_id` or the latest snapshot if none is given, plus the command options used to render the launcher, controller, worker, and queue
+
+Completion proof:
+- generated launcher script, worker sbatch script, controller script, and `queue.tsv`
+- `runs/<run_id>/manifest.json`
+- `runs` ledger row in SQLite
+
+Skip behavior:
+- none at the workflow level; rerunning regenerates the run scaffolding
+
+Rerun contract:
+- always safe to rerun
+- operational identity comes from the referenced `staging_id` and `run_id`, not from mutable staged paths
+- `--limit` intentionally changes the queued proteome set for debug-sized runs
+- when `gff3` output is requested, the generated worker job enforces a minimum memory request of `4G`
+
+Operator guidance:
+- the launcher now runs a submit-and-poll controller that submits one worker at a time with `sbatch --parsable`, records the child job ID in `queue.tsv`, polls that exact job with `squeue`/`sacct`, and only then advances
+- on Puhti, the worker script loads `biokit` and `interproscan` modules before running `cluster_interproscan`
+- local development should still treat this as a write-first command unless explicit `--submit` behavior is being tested on CSC
+
 ## Status Interpretation
 
 `status` summarizes the latest restore and download ledger rows and the latest staging snapshot.

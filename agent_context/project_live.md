@@ -23,8 +23,11 @@ This is the working status board for developers. It is intentionally short and o
 - `busco-slurm` now writes `runs/<run_id>/manifest.json` and records a `runs` row when it generates a script.
 - `busco-slurm` now records the expected BUSCO batch root and `batch_summary.txt` path in the run manifest and uses `batch_summary.txt` as the batch-mode completion signal.
 - `busco ingest-results` now imports BUSCO `batch_summary.txt` into SQLite `busco_results` as a manual post-run step after the user verifies completion.
-- `interproscan-slurm` now writes a launcher script, worker script, per-proteome queue ledger, `runs/<run_id>/manifest.json`, and a `runs` row for launcher-based InterProScan execution on staged proteomes.
-- the next InterProScan step is to replace the current synchronous launcher scaffold with a real submit-and-poll controller that records child Slurm job IDs and advances the queue only after the previous proteome finishes.
+- `interproscan-slurm` now writes a launcher script, worker sbatch script, controller script, per-proteome queue ledger, `runs/<run_id>/manifest.json`, and a `runs` row for launcher-based InterProScan execution on staged proteomes.
+- `interproscan-slurm` now uses a true submit-and-poll controller: the launcher runs a controller script, the controller submits one worker job at a time with `sbatch --parsable`, records the child job ID in `queue.tsv`, polls that exact job via `squeue`/`sacct`, and only then advances to the next proteome.
+- the generated InterProScan worker job now loads Puhti modules with `module load biokit` and `module load interproscan`; `interproscan.bin_dir` is optional and only prepended to `PATH` if explicitly configured.
+- `interproscan-slurm` now supports `--limit` to include only the first `N` staged proteomes in the queue for debugging.
+- `interproscan-slurm` now enforces a minimum worker memory of `4G` when `gff3` output is requested.
 - the broken duplicate path helper in `src/fungalphylo/core/paths.py` was removed.
 - README has been updated to the snapshot-first model.
 - `fetch-index --ingest-from-cache` no longer requires JGI authentication.
@@ -61,7 +64,7 @@ This is the working status board for developers. It is intentionally short and o
 - staging into canonical per-portal FASTA files
 - BUSCO sbatch script generation
 - BUSCO batch summary import and taxonomy mockup generation
-- InterProScan launcher/worker/queue script generation
+- InterProScan launcher/controller/worker/queue generation
 - large real-data intake through `stage`
 
 ## Immediate Missing Work
@@ -73,8 +76,8 @@ This is the working status board for developers. It is intentionally short and o
 ### Restartability
 
 - validate the manual BUSCO result-import workflow on CSC/Puhti using the validated staged outputs when cluster access is available
-- test InterProScan launcher behavior on Puhti with real `cluster_interproscan` output and verify that one-proteome-at-a-time queueing avoids scheduler limit issues
-- upgrade `interproscan-slurm` so the launcher submits one child job at a time, records the exact job ID in the queue ledger, polls that job specifically, and only then advances to the next proteome
+- test the upgraded InterProScan controller on Puhti with real `cluster_interproscan` output and verify that one-proteome-at-a-time queueing avoids scheduler limit issues
+- confirm the generated module-load path (`biokit`, `interproscan`) and worker-resource defaults on Puhti, especially the GFF3 `4G` memory floor
 
 ### Maintainability
 
@@ -90,8 +93,8 @@ This is the working status board for developers. It is intentionally short and o
 ## Suggested Work Order
 
 1. Validate BUSCO script generation, cluster completion, and manual `busco ingest-results` on CSC/Puhti using validated staging outputs.
-2. Upgrade `interproscan-slurm` from the current write-first scaffold to a real submit-and-poll controller with child job IDs.
-3. Test the upgraded InterProScan queue controller on Puhti with real `cluster_interproscan` output.
+2. Test the upgraded InterProScan queue controller on Puhti with real `cluster_interproscan` output.
+3. Confirm the Puhti module-load path and worker-memory behavior, including `--limit` debug runs and GFF3 output.
 4. Only then implement additional compute steps.
 
 ## Definition Of “Good Enough” For The Next Milestone
