@@ -56,12 +56,16 @@ def _seed_staging(paths: ProjectPaths, staging_id: str) -> None:
 
 
 def _write_tools_yaml(paths: ProjectPaths, *, bin_dir: Path, command: str = "cluster_interproscan") -> None:
+    _write_tools_yaml_optional(paths, str(bin_dir), command)
+
+
+def _write_tools_yaml_optional(paths: ProjectPaths, bin_dir: str, command: str = "cluster_interproscan") -> None:
     paths.tools_yaml.write_text(
         "busco:\n"
         "  bin_dir: \"\"\n"
         "  command: \"busco\"\n"
         "interproscan:\n"
-        f"  bin_dir: {json.dumps(str(bin_dir))}\n"
+        f"  bin_dir: {json.dumps(bin_dir)}\n"
         f"  command: {json.dumps(command)}\n",
         encoding="utf-8",
     )
@@ -123,6 +127,8 @@ def test_interproscan_slurm_writes_launcher_worker_queue_and_manifest(tmp_path: 
     worker_text = worker.read_text(encoding="utf-8")
     launcher_text = launcher.read_text(encoding="utf-8")
     controller_text = controller.read_text(encoding="utf-8")
+    assert "module load biokit" in worker_text
+    assert "module load interproscan" in worker_text
     assert "--applications 'pfam'" in worker_text
     assert "--applications 'panther'" in worker_text
     assert "--formats 'tsv'" in worker_text
@@ -256,6 +262,38 @@ def test_interproscan_slurm_limit_restricts_queue_to_first_n_proteomes(tmp_path:
     assert [row["portal_id"] for row in rows] == ["PortalA"]
     assert manifest["interproscan"]["limit"] == 1
     assert manifest["interproscan"]["n_proteomes"] == 1
+
+
+def test_interproscan_slurm_does_not_require_bin_dir_when_modules_are_used(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+    _seed_staging(paths, "staging1")
+
+    _write_tools_yaml_optional(paths, "", "cluster_interproscan")
+
+    result = runner.invoke(
+        app,
+        [
+            "interproscan-slurm",
+            "--account",
+            "project_1234567",
+            "--staging-id",
+            "staging1",
+            "--run-id",
+            "ipr_modules",
+            str(project_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    worker = project_dir / "runs" / "ipr_modules" / "slurm" / "interproscan_worker.sbatch"
+    manifest = json.loads((project_dir / "runs" / "ipr_modules" / "manifest.json").read_text(encoding="utf-8"))
+    worker_text = worker.read_text(encoding="utf-8")
+    assert "module load biokit" in worker_text
+    assert "module load interproscan" in worker_text
+    assert "export PATH=" not in worker_text
+    assert manifest["interproscan"]["bin_dir"] is None
+    assert manifest["interproscan"]["module_loads"] == ["biokit", "interproscan"]
 
 
 def test_interproscan_slurm_requires_existing_staging_dir(tmp_path: Path) -> None:

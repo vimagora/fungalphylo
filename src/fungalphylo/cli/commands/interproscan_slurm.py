@@ -142,9 +142,9 @@ def interproscan_slurm_command(
     tools = load_tools(project_dir)
     bin_dir = interproscan_bin_dir.expanduser().resolve() if interproscan_bin_dir else tools.interproscan.bin_dir
     interproscan_cmd = tools.interproscan.command or "cluster_interproscan"
-    if bin_dir is None or not bin_dir.exists():
+    if bin_dir is not None and not bin_dir.exists():
         raise typer.BadParameter(
-            "InterProScan path not configured or does not exist.\n"
+            "InterProScan bin_dir does not exist.\n"
             "Set tools.yaml:\n"
             "  interproscan:\n"
             "    bin_dir: /path/to/bin\n"
@@ -218,10 +218,18 @@ IPR_CMD="${{IPR_CMD:?missing IPR_CMD}}"
 mkdir -p "$RESULT_DIR" "$WORK_DIR"
 cd "$RESULT_DIR"
 
-export PATH="{bin_dir.as_posix()}:$PATH"
+module load biokit
+module load interproscan
+
+"""
+    if bin_dir is not None:
+        worker_script += f"""export PATH="{bin_dir.as_posix()}:$PATH"
+
+"""
+    worker_script += f"""\
 
 if ! command -v "$IPR_CMD" >/dev/null 2>&1; then
-  echo "ERROR: '$IPR_CMD' not found on PATH after prepending {bin_dir.as_posix()}." >&2
+  echo "ERROR: '$IPR_CMD' not found on PATH after module load." >&2
   exit 127
 fi
 
@@ -456,7 +464,8 @@ python3 "{controller_path.as_posix()}"
             "applications": applications,
             "formats": formats,
             "command": interproscan_cmd,
-            "bin_dir": str(bin_dir),
+            "bin_dir": (str(bin_dir) if bin_dir is not None else None),
+            "module_loads": ["biokit", "interproscan"],
             "limit": limit,
             "poll_seconds": poll_seconds,
             "n_proteomes": len(queue_rows),

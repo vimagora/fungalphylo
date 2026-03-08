@@ -15,8 +15,10 @@ busco:
   # Optional: executable name (default: "busco")
   command: "busco"
 interproscan:
-  # Directory containing cluster_interproscan and related helpers.
-  # Example: /appl/soft/bio/interproscan/bin
+  # Optional: directory containing cluster_interproscan and related helpers.
+  # On Puhti, prefer loading modules inside the job script:
+  #   module load biokit
+  #   module load interproscan
   bin_dir: ""
   # Optional: executable name (default: "cluster_interproscan")
   command: "cluster_interproscan"
