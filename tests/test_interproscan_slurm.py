@@ -103,11 +103,13 @@ def test_interproscan_slurm_writes_launcher_worker_queue_and_manifest(tmp_path: 
 
     assert result.exit_code == 0, result.output
     launcher = project_dir / "runs" / "ipr_test" / "slurm" / "interproscan_launcher.sbatch"
-    worker = project_dir / "runs" / "ipr_test" / "scripts" / "run_one_interproscan.sh"
+    worker = project_dir / "runs" / "ipr_test" / "slurm" / "interproscan_worker.sbatch"
+    controller = project_dir / "runs" / "ipr_test" / "scripts" / "interproscan_controller.py"
     queue = project_dir / "runs" / "ipr_test" / "queue.tsv"
     manifest_path = project_dir / "runs" / "ipr_test" / "manifest.json"
     assert launcher.exists()
     assert worker.exists()
+    assert controller.exists()
     assert queue.exists()
     assert manifest_path.exists()
 
@@ -115,14 +117,20 @@ def test_interproscan_slurm_writes_launcher_worker_queue_and_manifest(tmp_path: 
     assert manifest["kind"] == "interproscan"
     assert manifest["interproscan"]["applications"] == ["pfam", "panther"]
     assert manifest["interproscan"]["formats"] == ["tsv"]
+    assert manifest["interproscan"]["controller_mode"] == "submit_and_poll"
     assert manifest["slurm"]["submit"] is False
 
     worker_text = worker.read_text(encoding="utf-8")
     launcher_text = launcher.read_text(encoding="utf-8")
+    controller_text = controller.read_text(encoding="utf-8")
     assert "--applications 'pfam'" in worker_text
     assert "--applications 'panther'" in worker_text
     assert "--formats 'tsv'" in worker_text
-    assert 'IPR_CMD="cluster_interproscan"' in launcher_text
+    assert "#SBATCH --partition=small" in worker_text
+    assert f'python3 "{controller.as_posix()}"' in launcher_text
+    assert '"sbatch",' in controller_text
+    assert '"sacct", "-n", "-P"' in controller_text
+    assert '"squeue", "-h", "-j"' in controller_text
 
     with queue.open("r", encoding="utf-8", newline="") as f:
         rows = list(csv.DictReader(f, delimiter="\t"))
@@ -168,6 +176,86 @@ def test_interproscan_slurm_submit_path_is_mockable(tmp_path: Path, monkeypatch)
         str(project_dir / "runs" / "ipr_submit" / "slurm" / "interproscan_launcher.sbatch"),
     ]]
     assert "Submitted batch job 99999" in result.output
+
+
+def test_interproscan_slurm_allows_distinct_worker_resources(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+    _seed_staging(paths, "staging1")
+
+    bin_dir = tmp_path / "ipr-bin"
+    bin_dir.mkdir()
+    _write_tools_yaml(paths, bin_dir=bin_dir)
+
+    result = runner.invoke(
+        app,
+        [
+            "interproscan-slurm",
+            "--account",
+            "project_1234567",
+            "--staging-id",
+            "staging1",
+            "--run-id",
+            "ipr_resources",
+            "--worker-partition",
+            "long",
+            "--worker-time",
+            "72:00:00",
+            "--worker-cpus",
+            "8",
+            "--worker-mem",
+            "32G",
+            str(project_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    worker = project_dir / "runs" / "ipr_resources" / "slurm" / "interproscan_worker.sbatch"
+    manifest = json.loads((project_dir / "runs" / "ipr_resources" / "manifest.json").read_text(encoding="utf-8"))
+    worker_text = worker.read_text(encoding="utf-8")
+    assert "#SBATCH --partition=long" in worker_text
+    assert "#SBATCH --time=72:00:00" in worker_text
+    assert "#SBATCH --cpus-per-task=8" in worker_text
+    assert "#SBATCH --mem=32G" in worker_text
+    assert manifest["slurm"]["worker_partition"] == "long"
+    assert manifest["slurm"]["worker_time"] == "72:00:00"
+    assert manifest["slurm"]["worker_cpus"] == 8
+    assert manifest["slurm"]["worker_mem"] == "32G"
+
+
+def test_interproscan_slurm_limit_restricts_queue_to_first_n_proteomes(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+    _seed_staging(paths, "staging1")
+
+    bin_dir = tmp_path / "ipr-bin"
+    bin_dir.mkdir()
+    _write_tools_yaml(paths, bin_dir=bin_dir)
+
+    result = runner.invoke(
+        app,
+        [
+            "interproscan-slurm",
+            "--account",
+            "project_1234567",
+            "--staging-id",
+            "staging1",
+            "--run-id",
+            "ipr_limit",
+            "--limit",
+            "1",
+            str(project_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    queue = project_dir / "runs" / "ipr_limit" / "queue.tsv"
+    manifest = json.loads((project_dir / "runs" / "ipr_limit" / "manifest.json").read_text(encoding="utf-8"))
+    with queue.open("r", encoding="utf-8", newline="") as f:
+        rows = list(csv.DictReader(f, delimiter="\t"))
+    assert [row["portal_id"] for row in rows] == ["PortalA"]
+    assert manifest["interproscan"]["limit"] == 1
+    assert manifest["interproscan"]["n_proteomes"] == 1
 
 
 def test_interproscan_slurm_requires_existing_staging_dir(tmp_path: Path) -> None:
