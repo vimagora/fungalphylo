@@ -230,10 +230,13 @@ Rerun contract:
 - operational identity comes from the referenced `staging_id` and `run_id`, not from mutable staged paths
 - `--limit` intentionally changes the queued proteome set for debug-sized runs
 - for the current Puhti `cluster_interproscan` wrapper path, the generated worker uses one explicit `-o` output file and therefore supports only a single `TSV` format
+- `--resume-run-id <run_id>` is the in-place continuation path for an existing InterProScan run; it refreshes the launcher/controller/worker scripts for that run, preserves the existing `queue.tsv` ledger, and can optionally re-submit the launcher
+- do not use `--run-id <existing_run_id>` as a resume path; that mode creates fresh scaffolding and rewrites `queue.tsv`
 
 Operator guidance:
 - the launcher now runs a submit-and-poll controller that submits one worker at a time with `sbatch --parsable`, records the child job ID in `queue.tsv`, polls that exact job with `squeue`/`sacct`, and only then advances
 - on Puhti, the worker script loads `biokit` and `interproscan` modules before running `cluster_interproscan`
+- the generated launcher now invokes the controller with the same Python interpreter that wrote the run, avoiding dependence on a bare `python3` environment
 - local development should still treat this as a write-first command unless explicit `--submit` behavior is being tested on CSC
 
 ## Status Interpretation

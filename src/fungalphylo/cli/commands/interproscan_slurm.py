@@ -4,6 +4,7 @@ import csv
 import json
 import re
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -65,6 +66,15 @@ def _write_queue_tsv(path: Path, rows: list[dict[str, str]]) -> None:
             )
 
 
+def _load_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise typer.BadParameter(f"Missing required file: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(f"Invalid JSON in {path}: {exc}") from exc
+
+
 @app.callback(invoke_without_command=True)
 def interproscan_slurm_command(
     ctx: typer.Context,
@@ -73,6 +83,11 @@ def interproscan_slurm_command(
     account: Optional[str] = typer.Option(None, "--account", help="SLURM account (overrides auto-detect)"),
     no_confirm: bool = typer.Option(False, "--no-confirm", help="Do not prompt to confirm detected account"),
     run_id: Optional[str] = typer.Option(None, "--run-id", help="Run identifier (default: interproscan_<timestamp>)"),
+    resume_run_id: Optional[str] = typer.Option(
+        None,
+        "--resume-run-id",
+        help="Resume an existing InterProScan run without rewriting its queue ledger.",
+    ),
     application: list[str] = typer.Option(
         ["PfamA"],
         "--application",
@@ -115,33 +130,80 @@ def interproscan_slurm_command(
     paths = ProjectPaths(project_dir)
     ensure_project_dirs(paths)
     init_db(paths.db_path)
-    selected_staging_id = resolve_staging_id(project_dir, staging_id)
-
-    staged_proteomes = paths.staging_proteomes_dir(selected_staging_id)
-    if not staged_proteomes.exists():
-        raise typer.BadParameter(f"Missing staged proteomes dir for {selected_staging_id}: {staged_proteomes}")
-
-    proteomes = sorted(staged_proteomes.glob("*.faa"))
-    if not proteomes:
-        raise typer.BadParameter(f"No staged proteome FASTA files found in {staged_proteomes}")
-    if limit is not None:
-        proteomes = proteomes[:limit]
-
-    inferred = infer_account_from_project_dir(project_dir)
-    acct = account or inferred
-    if not acct:
-        raise typer.BadParameter(
-            "Could not infer SLURM account from project_dir (expected /scratch/<account>/...). "
-            "Provide --account explicitly."
-        )
-    if not no_confirm and account is None:
-        ok = typer.confirm(f"Detected SLURM account '{acct}' from project_dir. Use this account?", default=True)
-        if not ok:
-            raise typer.BadParameter("Account not confirmed. Re-run with --account <account> or --no-confirm.")
-
     tools = load_tools(project_dir)
-    bin_dir = interproscan_bin_dir.expanduser().resolve() if interproscan_bin_dir else tools.interproscan.bin_dir
-    interproscan_cmd = tools.interproscan.command or "cluster_interproscan"
+    if run_id and resume_run_id:
+        raise typer.BadParameter("Use either --run-id for a new run or --resume-run-id for an existing run, not both.")
+
+    resume_mode = resume_run_id is not None
+    format_aliases = {"tsv": "TSV", "xml": "XML", "gff3": "GFF3"}
+
+    if resume_mode:
+        rid = resume_run_id or ""
+        manifest_path = paths.run_manifest(rid)
+        manifest_data = _load_json(manifest_path)
+        if manifest_data.get("kind") != "interproscan":
+            raise typer.BadParameter(f"Run {rid!r} is not an InterProScan run: {manifest_path}")
+
+        queue_path = project_dir / manifest_data["paths"]["queue_tsv"]
+        if not queue_path.exists():
+            raise typer.BadParameter(f"Cannot resume InterProScan run {rid!r}: missing queue ledger {queue_path}")
+
+        selected_staging_id = str(manifest_data["staging_id"])
+        applications = list(manifest_data.get("interproscan", {}).get("applications") or ["PfamA"])
+        formats = list(manifest_data.get("interproscan", {}).get("formats") or ["TSV"])
+        interproscan_cmd = manifest_data.get("interproscan", {}).get("command") or tools.interproscan.command or "cluster_interproscan"
+        poll_seconds = int(manifest_data.get("interproscan", {}).get("poll_seconds") or poll_seconds)
+        acct = str(manifest_data.get("slurm", {}).get("account") or "")
+        partition = str(manifest_data.get("slurm", {}).get("partition") or partition)
+        time = str(manifest_data.get("slurm", {}).get("time") or time)
+        cpus = int(manifest_data.get("slurm", {}).get("cpus") or cpus)
+        mem = str(manifest_data.get("slurm", {}).get("mem") or mem)
+        effective_worker_partition = str(manifest_data.get("slurm", {}).get("worker_partition") or partition)
+        effective_worker_time = str(manifest_data.get("slurm", {}).get("worker_time") or time)
+        effective_worker_cpus = int(manifest_data.get("slurm", {}).get("worker_cpus") or cpus)
+        effective_worker_mem = str(manifest_data.get("slurm", {}).get("worker_mem") or mem)
+        manifest_bin_dir = manifest_data.get("interproscan", {}).get("bin_dir")
+        if interproscan_bin_dir is not None:
+            bin_dir = interproscan_bin_dir.expanduser().resolve()
+        elif manifest_bin_dir:
+            bin_dir = Path(str(manifest_bin_dir)).expanduser().resolve()
+        else:
+            bin_dir = tools.interproscan.bin_dir
+    else:
+        selected_staging_id = resolve_staging_id(project_dir, staging_id)
+        inferred = infer_account_from_project_dir(project_dir)
+        acct = account or inferred
+        if not acct:
+            raise typer.BadParameter(
+                "Could not infer SLURM account from project_dir (expected /scratch/<account>/...). "
+                "Provide --account explicitly."
+            )
+        if not no_confirm and account is None:
+            ok = typer.confirm(f"Detected SLURM account '{acct}' from project_dir. Use this account?", default=True)
+            if not ok:
+                raise typer.BadParameter("Account not confirmed. Re-run with --account <account> or --no-confirm.")
+
+        bin_dir = interproscan_bin_dir.expanduser().resolve() if interproscan_bin_dir else tools.interproscan.bin_dir
+        interproscan_cmd = tools.interproscan.command or "cluster_interproscan"
+        applications = list(dict.fromkeys([a.strip() for a in application if a.strip()]))
+        if not applications:
+            applications = ["PfamA"]
+        formats = []
+        for raw_format in fmt:
+            value = raw_format.strip()
+            if not value:
+                continue
+            formats.append(format_aliases.get(value.lower(), value))
+        formats = list(dict.fromkeys(formats))
+        if not formats:
+            formats = ["TSV"]
+        effective_worker_partition = worker_partition or partition
+        effective_worker_time = worker_time or time
+        effective_worker_cpus = worker_cpus or cpus
+        effective_worker_mem = worker_mem or mem
+        rid = run_id or f"interproscan_{_now_tag()}"
+        manifest_data = {}
+
     if bin_dir is not None and not bin_dir.exists():
         raise typer.BadParameter(
             "InterProScan bin_dir does not exist.\n"
@@ -150,30 +212,15 @@ def interproscan_slurm_command(
             "    bin_dir: /path/to/bin\n"
             "or pass --interproscan-bin-dir /path/to/bin"
         )
-
-    applications = list(dict.fromkeys([a.strip() for a in application if a.strip()]))
-    if not applications:
-        applications = ["PfamA"]
-    format_aliases = {"tsv": "TSV", "xml": "XML", "gff3": "GFF3"}
-    formats = []
-    for raw_format in fmt:
-        value = raw_format.strip()
-        if not value:
-            continue
-        formats.append(format_aliases.get(value.lower(), value))
-    formats = list(dict.fromkeys(formats))
-    if not formats:
-        formats = ["TSV"]
     if len(formats) != 1 or formats[0] != "TSV":
         raise typer.BadParameter(
             "Puhti cluster_interproscan currently supports only a single explicit TSV output for this command."
         )
-    effective_worker_partition = worker_partition or partition
-    effective_worker_time = worker_time or time
-    effective_worker_cpus = worker_cpus or cpus
-    effective_worker_mem = worker_mem or mem
 
-    rid = run_id or f"interproscan_{_now_tag()}"
+    staged_proteomes = paths.staging_proteomes_dir(selected_staging_id)
+    if not staged_proteomes.exists():
+        raise typer.BadParameter(f"Missing staged proteomes dir for {selected_staging_id}: {staged_proteomes}")
+
     run_root = paths.run_dir(rid)
     slurm_dir = run_root / "slurm"
     scripts_dir = run_root / "scripts"
@@ -189,25 +236,38 @@ def interproscan_slurm_command(
     for d in (slurm_dir, scripts_dir, inputs_dir, work_dir, results_root, logs_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    queue_rows = []
-    for proteome in proteomes:
-        portal_id = proteome.stem
-        result_dir = results_root / portal_id
-        queue_rows.append(
-            {
-                "portal_id": portal_id,
-                "input_fasta": str(proteome),
-                "status": "pending",
-                "submitted_job_id": "",
-                "results_dir": str(result_dir),
-                "tsv_path": str(result_dir / f"{portal_id}.tsv"),
-                "note": "",
-            }
-        )
-    _write_queue_tsv(queue_path, queue_rows)
+    if resume_mode:
+        queue_rows = []
+        with queue_path.open("r", encoding="utf-8", newline="") as f:
+            queue_rows = list(csv.DictReader(f, delimiter="\t"))
+        if not queue_rows:
+            raise typer.BadParameter(f"Cannot resume InterProScan run {rid!r}: queue ledger is empty: {queue_path}")
+    else:
+        proteomes = sorted(staged_proteomes.glob("*.faa"))
+        if not proteomes:
+            raise typer.BadParameter(f"No staged proteome FASTA files found in {staged_proteomes}")
+        if limit is not None:
+            proteomes = proteomes[:limit]
+        queue_rows = []
+        for proteome in proteomes:
+            portal_id = proteome.stem
+            result_dir = results_root / portal_id
+            queue_rows.append(
+                {
+                    "portal_id": portal_id,
+                    "input_fasta": str(proteome),
+                    "status": "pending",
+                    "submitted_job_id": "",
+                    "results_dir": str(result_dir),
+                    "tsv_path": str(result_dir / f"{portal_id}.tsv"),
+                    "note": "",
+                }
+            )
+        _write_queue_tsv(queue_path, queue_rows)
 
     app_args = " ".join(f"-appl {shlex_quote(a)}" for a in applications)
     fmt_args = " ".join(f"-f {shlex_quote(f)}" for f in formats)
+    python_exec = shlex_quote(sys.executable or "python3")
 
     worker_script = f"""#!/bin/bash
 #SBATCH --account={acct}
@@ -453,77 +513,78 @@ if __name__ == "__main__":
 
 set -euo pipefail
 
-python3 "{controller_path.as_posix()}"
+{python_exec} "{controller_path.as_posix()}"
 """
     launcher_path.write_text(launcher_script, encoding="utf-8")
 
-    manifest_data = {
-        "run_id": rid,
-        "kind": "interproscan",
-        "created_at": _now_iso(),
-        "staging_id": selected_staging_id,
-        "project_dir": str(project_dir),
-        "paths": {
-            "run_dir": str(run_root.relative_to(project_dir)),
-            "launcher_script": str(launcher_path.relative_to(project_dir)),
-            "worker_script": str(worker_path.relative_to(project_dir)),
-            "controller_script": str(controller_path.relative_to(project_dir)),
-            "queue_tsv": str(queue_path.relative_to(project_dir)),
-            "results_root": str(results_root.relative_to(project_dir)),
-        },
-        "interproscan": {
-            "applications": applications,
-            "formats": formats,
-            "command": interproscan_cmd,
-            "bin_dir": (str(bin_dir) if bin_dir is not None else None),
-            "module_loads": ["biokit", "interproscan"],
-            "limit": limit,
-            "poll_seconds": poll_seconds,
-            "n_proteomes": len(queue_rows),
-            "controller_mode": "submit_and_poll",
-        },
-        "slurm": {
-            "account": acct,
-            "partition": partition,
-            "time": time,
-            "cpus": cpus,
-            "mem": mem,
-            "submit": submit,
-            "worker_partition": effective_worker_partition,
-            "worker_time": effective_worker_time,
-            "worker_cpus": effective_worker_cpus,
-            "worker_mem": effective_worker_mem,
-        },
-    }
-    manifest_path = paths.run_manifest(rid)
-    write_manifest(manifest_path, manifest_data)
-    manifest_sha256 = hash_json(manifest_data)
+    if not resume_mode:
+        manifest_data = {
+            "run_id": rid,
+            "kind": "interproscan",
+            "created_at": _now_iso(),
+            "staging_id": selected_staging_id,
+            "project_dir": str(project_dir),
+            "paths": {
+                "run_dir": str(run_root.relative_to(project_dir)),
+                "launcher_script": str(launcher_path.relative_to(project_dir)),
+                "worker_script": str(worker_path.relative_to(project_dir)),
+                "controller_script": str(controller_path.relative_to(project_dir)),
+                "queue_tsv": str(queue_path.relative_to(project_dir)),
+                "results_root": str(results_root.relative_to(project_dir)),
+            },
+            "interproscan": {
+                "applications": applications,
+                "formats": formats,
+                "command": interproscan_cmd,
+                "bin_dir": (str(bin_dir) if bin_dir is not None else None),
+                "module_loads": ["biokit", "interproscan"],
+                "limit": limit,
+                "poll_seconds": poll_seconds,
+                "n_proteomes": len(queue_rows),
+                "controller_mode": "submit_and_poll",
+            },
+            "slurm": {
+                "account": acct,
+                "partition": partition,
+                "time": time,
+                "cpus": cpus,
+                "mem": mem,
+                "submit": submit,
+                "worker_partition": effective_worker_partition,
+                "worker_time": effective_worker_time,
+                "worker_cpus": effective_worker_cpus,
+                "worker_mem": effective_worker_mem,
+            },
+        }
+        manifest_path = paths.run_manifest(rid)
+        write_manifest(manifest_path, manifest_data)
+        manifest_sha256 = hash_json(manifest_data)
 
-    conn = connect(paths.db_path)
-    try:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO runs(run_id, staging_id, kind, created_at, manifest_path, manifest_sha256)
-            VALUES(?,?,?,?,?,?)
-            """,
-            (
-                rid,
-                selected_staging_id,
-                "interproscan",
-                manifest_data["created_at"],
-                str(manifest_path.relative_to(project_dir)),
-                manifest_sha256,
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+        conn = connect(paths.db_path)
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO runs(run_id, staging_id, kind, created_at, manifest_path, manifest_sha256)
+                VALUES(?,?,?,?,?,?)
+                """,
+                (
+                    rid,
+                    selected_staging_id,
+                    "interproscan",
+                    manifest_data["created_at"],
+                    str(manifest_path.relative_to(project_dir)),
+                    manifest_sha256,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     log_event(
         project_dir,
         {
-            "ts": manifest_data["created_at"],
-            "event": "slurm_interproscan_write",
+            "ts": _now_iso(),
+            "event": "slurm_interproscan_resume" if resume_mode else "slurm_interproscan_write",
             "run_id": rid,
             "staging_id": selected_staging_id,
             "launcher_script": str(launcher_path),
@@ -532,14 +593,21 @@ python3 "{controller_path.as_posix()}"
             "queue_tsv": str(queue_path),
             "applications": applications,
             "formats": formats,
-            "limit": limit,
+            "limit": None if resume_mode else limit,
+            "resume": resume_mode,
             "submit": submit,
         },
     )
 
-    typer.echo(f"Wrote InterProScan launcher: {launcher_path}")
-    typer.echo(f"Wrote InterProScan worker:   {worker_path}")
-    typer.echo(f"Wrote InterProScan queue:    {queue_path}")
+    if resume_mode:
+        typer.echo(f"Resuming InterProScan run:  {rid}")
+        typer.echo(f"Refreshed launcher:         {launcher_path}")
+        typer.echo(f"Refreshed worker:           {worker_path}")
+        typer.echo(f"Reused queue ledger:        {queue_path}")
+    else:
+        typer.echo(f"Wrote InterProScan launcher: {launcher_path}")
+        typer.echo(f"Wrote InterProScan worker:   {worker_path}")
+        typer.echo(f"Wrote InterProScan queue:    {queue_path}")
 
     if submit:
         try:

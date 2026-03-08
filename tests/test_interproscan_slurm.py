@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -135,7 +136,8 @@ def test_interproscan_slurm_writes_launcher_worker_queue_and_manifest(tmp_path: 
     assert '-f \'TSV\'' in worker_text
     assert '-o "$OUTPUT_TSV"' in worker_text
     assert "#SBATCH --partition=small" in worker_text
-    assert f'python3 "{controller.as_posix()}"' in launcher_text
+    assert f"'{sys.executable}' " in launcher_text
+    assert f'"{controller.as_posix()}"' in launcher_text
     assert '"sbatch",' in controller_text
     assert '"sacct", "-n", "-P"' in controller_text
     assert '"squeue", "-h", "-j"' in controller_text
@@ -187,6 +189,110 @@ def test_interproscan_slurm_submit_path_is_mockable(tmp_path: Path, monkeypatch)
         str(project_dir / "runs" / "ipr_submit" / "slurm" / "interproscan_launcher.sbatch"),
     ]]
     assert "Submitted batch job 99999" in result.output
+
+
+def test_interproscan_slurm_resume_reuses_existing_queue(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+    _seed_staging(paths, "staging1")
+
+    bin_dir = tmp_path / "ipr-bin"
+    bin_dir.mkdir()
+    _write_tools_yaml(paths, bin_dir=bin_dir)
+
+    initial = runner.invoke(
+        app,
+        [
+            "interproscan-slurm",
+            "--account",
+            "project_1234567",
+            "--staging-id",
+            "staging1",
+            "--run-id",
+            "ipr_resume",
+            str(project_dir),
+        ],
+    )
+    assert initial.exit_code == 0, initial.output
+
+    queue = project_dir / "runs" / "ipr_resume" / "queue.tsv"
+    with queue.open("r", encoding="utf-8", newline="") as f:
+        rows = list(csv.DictReader(f, delimiter="\t"))
+    rows[0]["status"] = "completed"
+    rows[0]["submitted_job_id"] = "11111"
+    rows[1]["status"] = "submitted"
+    rows[1]["submitted_job_id"] = "22222"
+    with queue.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=rows[0].keys(), delimiter="\t")
+        writer.writeheader()
+        writer.writerows(rows)
+
+    resumed = runner.invoke(
+        app,
+        [
+            "interproscan-slurm",
+            "--resume-run-id",
+            "ipr_resume",
+            str(project_dir),
+        ],
+    )
+    assert resumed.exit_code == 0, resumed.output
+    assert "Resuming InterProScan run:  ipr_resume" in resumed.output
+    assert "Reused queue ledger:" in resumed.output
+
+    with queue.open("r", encoding="utf-8", newline="") as f:
+        resumed_rows = list(csv.DictReader(f, delimiter="\t"))
+    assert resumed_rows == rows
+
+
+def test_interproscan_slurm_resume_submit_uses_existing_launcher(tmp_path: Path, monkeypatch) -> None:
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+    _seed_staging(paths, "staging1")
+
+    bin_dir = tmp_path / "ipr-bin"
+    bin_dir.mkdir()
+    _write_tools_yaml(paths, bin_dir=bin_dir)
+
+    initial = runner.invoke(
+        app,
+        [
+            "interproscan-slurm",
+            "--account",
+            "project_1234567",
+            "--staging-id",
+            "staging1",
+            "--run-id",
+            "ipr_resume_submit",
+            str(project_dir),
+        ],
+    )
+    assert initial.exit_code == 0, initial.output
+
+    calls: list[list[str]] = []
+
+    def _fake_run(args, check, capture_output, text):
+        calls.append(args)
+        return SimpleNamespace(stdout="Submitted batch job 12345\n")
+
+    monkeypatch.setattr("fungalphylo.cli.commands.interproscan_slurm.subprocess.run", _fake_run)
+
+    resumed = runner.invoke(
+        app,
+        [
+            "interproscan-slurm",
+            "--resume-run-id",
+            "ipr_resume_submit",
+            "--submit",
+            str(project_dir),
+        ],
+    )
+    assert resumed.exit_code == 0, resumed.output
+    assert calls == [[
+        "sbatch",
+        str(project_dir / "runs" / "ipr_resume_submit" / "slurm" / "interproscan_launcher.sbatch"),
+    ]]
+    assert "Submitted batch job 12345" in resumed.output
 
 
 def test_interproscan_slurm_allows_distinct_worker_resources(tmp_path: Path) -> None:

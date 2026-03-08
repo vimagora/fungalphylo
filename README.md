@@ -313,6 +313,22 @@ The command writes a launcher script, a worker sbatch script, a controller scrip
 
 The generated worker job loads the Puhti modules `biokit` and `interproscan` before running `cluster_interproscan`. `interproscan.bin_dir` is optional and only prepended to `PATH` if you explicitly configure it.
 
+If an InterProScan launcher run times out after some proteomes have already completed, resume the existing run from the CLI without rewriting its queue ledger:
+
+```bash
+fungalphylo interproscan-slurm /path/to/project --resume-run-id <run_id> --submit
+```
+
+This refreshes the launcher/controller scripts for that existing run, preserves the current `queue.tsv` statuses, and re-submits the launcher. The generated launcher now uses the same Python interpreter that wrote the run, so it does not depend on a bare `python3` having the right package environment.
+
+If you prefer to resubmit the already-generated launcher directly, this still works:
+
+```bash
+sbatch /path/to/project/runs/<run_id>/slurm/interproscan_launcher.sbatch
+```
+
+Both resume paths reuse the existing `queue.tsv` ledger and skip rows already marked `completed`. Do not rerun `fungalphylo interproscan-slurm --run-id <run_id>` for resume, because that command creates a fresh run scaffold and rewrites `queue.tsv`.
+
 Use `--limit N` to include only the first `N` staged proteomes in the queue for debugging.
 
 Use `--submit` only on systems that actually have `sbatch` access. In local development, the intended workflow is to write the scripts, review them, and submit them later on Puhti.
