@@ -14,6 +14,17 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return {str(row[1]) for row in rows}
+
+
+def _apply_lightweight_migrations(conn: sqlite3.Connection) -> None:
+    portal_columns = _column_names(conn, "portals")
+    if "ncbi_taxon_id" not in portal_columns:
+        conn.execute("ALTER TABLE portals ADD COLUMN ncbi_taxon_id INTEGER")
+
+
 def init_db(db_path: Path) -> None:
     """
     Create (or migrate) the SQLite database using the bundled schema.sql.
@@ -29,6 +40,7 @@ def init_db(db_path: Path) -> None:
     conn = connect(db_path)
     try:
         conn.executescript(sql)
+        _apply_lightweight_migrations(conn)
         conn.commit()
     finally:
         conn.close()

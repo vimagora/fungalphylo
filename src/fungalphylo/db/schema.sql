@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS portals (
   published_text TEXT,
   published_url  TEXT,
   is_published   INTEGER NOT NULL DEFAULT 0,
+  ncbi_taxon_id  INTEGER,
   dataset_id   TEXT,
   top_hit_id   TEXT,
   meta_json      TEXT

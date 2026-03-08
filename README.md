@@ -154,6 +154,21 @@ Apply to DB approvals:
 fungalphylo review apply /path/to/project review/review_edit_<ts>.tsv
 ```
 
+### 5b) Curate NCBI taxon IDs
+
+If you want a curated taxonomy mapping for later completeness-by-taxon analysis, apply a TSV with `portal_id` and `ncbi_taxon_id`:
+
+```bash
+fungalphylo taxonomy fetch-ncbi /path/to/project
+fungalphylo taxonomy export /path/to/project --approved-only --out review/portal_taxonomy.tsv
+fungalphylo taxonomy apply /path/to/project review/portal_taxonomy.tsv
+fungalphylo taxonomy busco-mockup /path/to/project --summary-rank family
+```
+
+Use `--approved-only` with `taxonomy export` to build a template for just the approved portals. Use `--dry-run` with `taxonomy apply` to validate the table without writing. Blank `ncbi_taxon_id` values clear an existing assignment by default.
+
+`taxonomy busco-mockup` reads the latest BUSCO run by default, expects a single summary TSV under `runs/<run_id>/busco_results/`, resolves lineage from the downloaded NCBI taxdump, and writes an HTML taxonomy-ordered QC report under `runs/<run_id>/reports/`. It supports `--summary-rank family|order` and highlights low-quality taxa below `--low-quality-threshold` (default `85`).
+
 ### 6) Request restore (can take hours/days)
 
 Restore is separate from download. By default, it requests restore for **all approved files** and emails when ready.
@@ -267,6 +282,18 @@ If `--staging-id` is omitted, the latest staging snapshot is used.
 Use `--submit` only on systems that actually have `sbatch` access. In local development, the intended workflow is to write the SLURM script, review it, and submit it later on Puhti.
 
 Each BUSCO script generation also writes `runs/<run_id>/manifest.json` and records a `runs` row in SQLite.
+
+For InterProScan on Puhti / SLURM:
+
+```bash
+fungalphylo interproscan-slurm /path/to/project --staging-id <staging_id> --application pfam
+```
+
+Repeat `--application` to request multiple InterProScan databases. The default application is `pfam`. Repeat `--format` to request multiple output formats; the default is `tsv`, and `tsv` is currently required for downstream parsing.
+
+The command writes a launcher script, a worker script, a per-proteome queue ledger, and a run manifest under `runs/<run_id>/`. The launcher-based design walks staged proteomes one at a time so the next `cluster_interproscan` call is not started until the previous proteome finishes, which avoids exhausting concurrent-job limits on Puhti when InterProScan submits its own cluster work internally.
+
+Use `--submit` only on systems that actually have `sbatch` access. In local development, the intended workflow is to write the scripts, review them, and submit them later on Puhti.
 
 ---
 

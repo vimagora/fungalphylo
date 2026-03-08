@@ -75,6 +75,17 @@ def status_command(
 
         # Approvals count
         approvals_n = conn.execute("SELECT COUNT(*) AS n FROM approvals").fetchone()["n"]
+        portals_with_taxon = conn.execute(
+            "SELECT COUNT(*) AS n FROM portals WHERE ncbi_taxon_id IS NOT NULL"
+        ).fetchone()["n"]
+        approved_with_taxon = conn.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM approvals a
+            JOIN portals p ON p.portal_id = a.portal_id
+            WHERE p.ncbi_taxon_id IS NOT NULL
+            """
+        ).fetchone()["n"]
 
         # Recent staging count
         stagings_n = conn.execute("SELECT COUNT(*) AS n FROM stagings").fetchone()["n"]
@@ -190,7 +201,9 @@ def status_command(
     t1.add_column("Value")
     t1.add_row("Portals (total)", str(total_portals))
     t1.add_row("Portals (published)", str(published_portals))
+    t1.add_row("Portals with NCBI taxon ID", str(portals_with_taxon))
     t1.add_row("Approvals", str(approvals_n))
+    t1.add_row("Approvals with NCBI taxon ID", str(approved_with_taxon))
     t1.add_row("Staging snapshots", str(stagings_n))
     console.print(t1)
     console.print()

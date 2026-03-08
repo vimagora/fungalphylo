@@ -655,6 +655,38 @@ def test_status_reports_checksum_mismatched_raw_files(tmp_path: Path) -> None:
     assert "proteome" in status_result.output
 
 
+def test_status_reports_taxonomy_coverage(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+    _insert_portal_with_approval(
+        paths,
+        portal_id="PortalA",
+        dataset_id="datasetA",
+        top_hit_id="topA",
+        proteome_file_id="protA",
+    )
+    _insert_portal_with_approval(
+        paths,
+        portal_id="PortalB",
+        dataset_id="datasetB",
+        top_hit_id="topB",
+        proteome_file_id="protB",
+    )
+
+    conn = connect(paths.db_path)
+    try:
+        conn.execute("UPDATE portals SET ncbi_taxon_id = 1234 WHERE portal_id = 'PortalA'")
+        conn.commit()
+    finally:
+        conn.close()
+
+    status_result = runner.invoke(app, ["status", str(project_dir)])
+    assert status_result.exit_code == 0, status_result.output
+    assert "Portals with NCBI taxon ID" in status_result.output
+    assert "Approvals with NCBI taxon ID" in status_result.output
+    assert "1234" not in status_result.output
+
+
 def test_move_files_using_manifest_records_ambiguous_matches(tmp_path: Path) -> None:
     project_dir = tmp_path / "project"
     paths = ProjectPaths(project_dir)

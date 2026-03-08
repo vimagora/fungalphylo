@@ -68,15 +68,20 @@ The main risks are not scale-related. They are semantic drift and incomplete res
 - `stage` now writes snapshot-scoped artifacts under `staging/<staging_id>/`.
 - `busco-slurm` consumes a chosen `staging_id` or the latest snapshot by default.
 - `busco-slurm` now writes a run manifest under `runs/<run_id>/manifest.json` and records a `runs` ledger row when generating the SLURM script.
+- `interproscan-slurm` now writes a launcher script, worker script, per-proteome queue ledger, run manifest, and `runs` ledger row for launcher-based InterProScan execution on staged proteomes.
+- the current `interproscan-slurm` implementation is intentionally only a write-first scaffold; before real Puhti use it should be upgraded to a true submit-and-poll controller that records child job IDs and advances one proteome at a time.
 - In this local development environment, compute commands should default to writing SLURM scripts only; keep explicit submit support in code, but do not rely on live Puhti submission during development or tests.
 - `autoselect` now honors config-driven scoring weights and configurable ban patterns.
 - `db` now enforces read-only SQL and opens SQLite in read-only mode.
+- `taxonomy apply` now updates first-class `portals.ncbi_taxon_id` values from a user-provided table.
+- `taxonomy fetch-ncbi` now downloads the NCBI `new_taxdump` archive into the project cache.
+- `taxonomy busco-mockup` now renders a taxonomy-ordered HTML BUSCO QC report from the latest BUSCO run plus local taxdump data.
 - `restore --dry-run` and `download --dry-run` now build payloads without requiring JGI authentication.
 - `download` now safely creates `unmatched_manifest.tsv` even when the kept-manifest directory does not yet exist.
 - `download` now retries transient `429`/`5xx`/timeout failures and verifies raw-file `md5` when source metadata provides it.
 - restore/download batch directories are now indexed in SQLite via `restore_requests` and `download_requests`.
 - download failure paths for malformed non-zip responses and missing manifest files are now covered by tests and recorded as failed batches.
-- compute commands beyond BUSCO are absent.
+- compute commands beyond BUSCO and InterProScan are absent.
 - the pytest suite now covers snapshot creation/reuse, cache-only fetch ingest, autoselect scoring/config behavior, db read-only enforcement, FASTA roundtrips, ID map loading, raw path resolution, restore/download request-ledger writes, restore dry-run/continue-on-error behavior, and download manifest mismatch/malformed-bundle handling.
 - legacy `staged_files` has been removed from the schema; `staging_files` is the active staging artifact table.
 - a real-data run has now validated the workflow from `init` through `stage` on a large MycoCosm-derived project.

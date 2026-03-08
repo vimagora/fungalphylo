@@ -20,6 +20,8 @@ This is the working status board for developers. It is intentionally short and o
 - `busco-slurm` can target a chosen `staging_id` and defaults to the latest snapshot.
 - local development should only write SLURM scripts for review; optional submit paths should remain implemented but are not expected to be exercised without Puhti access
 - `busco-slurm` now writes `runs/<run_id>/manifest.json` and records a `runs` row when it generates a script.
+- `interproscan-slurm` now writes a launcher script, worker script, per-proteome queue ledger, `runs/<run_id>/manifest.json`, and a `runs` row for launcher-based InterProScan execution on staged proteomes.
+- the next InterProScan step is to replace the current synchronous launcher scaffold with a real submit-and-poll controller that records child Slurm job IDs and advances the queue only after the previous proteome finishes.
 - the broken duplicate path helper in `src/fungalphylo/core/paths.py` was removed.
 - README has been updated to the snapshot-first model.
 - `fetch-index --ingest-from-cache` no longer requires JGI authentication.
@@ -27,6 +29,9 @@ This is the working status board for developers. It is intentionally short and o
 - `restore` now retries transient `429`/`5xx`/timeout failures before marking a payload failed.
 - `autoselect` now honors config-driven scoring weights and configurable ban patterns, with regression tests.
 - `db` now enforces read-only SQL and opens SQLite in read-only mode, with regression tests.
+- `taxonomy apply` now updates first-class `portals.ncbi_taxon_id` values from a TSV/CSV/XLSX table, with regression tests and migration coverage for existing databases.
+- `taxonomy fetch-ncbi` now downloads and extracts the NCBI `new_taxdump` archive into the project cache.
+- `taxonomy busco-mockup` now renders a taxonomy-ordered HTML BUSCO QC report from the latest BUSCO run and local taxdump data.
 - `restore --dry-run` and `download --dry-run` no longer require JGI authentication when only building payloads.
 - `download` now safely writes `unmatched_manifest.tsv` even when the target directory does not already exist.
 - restore/download request batches are now indexed in SQLite via `restore_requests` and `download_requests`, and `status` reads from that ledger.
@@ -51,6 +56,7 @@ This is the working status board for developers. It is intentionally short and o
 - download bundle extraction into `raw/`
 - staging into canonical per-portal FASTA files
 - BUSCO sbatch script generation
+- InterProScan launcher/worker/queue script generation
 - large real-data intake through `stage`
 
 ## Immediate Missing Work
@@ -64,6 +70,8 @@ This is the working status board for developers. It is intentionally short and o
 - review `busco-slurm` against the current immutable snapshot model and update any stale path or argument assumptions
 - add regression coverage for BUSCO script writing and the optional submit path without requiring Puhti access
 - test BUSCO script writing and submission behavior on CSC/Puhti using the validated staged outputs when cluster access is available
+- test InterProScan launcher behavior on Puhti with real `cluster_interproscan` output and verify that one-proteome-at-a-time queueing avoids scheduler limit issues
+- upgrade `interproscan-slurm` so the launcher submits one child job at a time, records the exact job ID in the queue ledger, polls that job specifically, and only then advances to the next proteome
 
 ### Maintainability
 

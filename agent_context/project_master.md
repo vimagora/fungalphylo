@@ -306,6 +306,8 @@ The current code is broadly compatible with Puhti-style usage:
 - file-based state is local to a project directory
 - SQLite is appropriate for single-user or low-contention workflows
 - SLURM integration begins with `busco-slurm`
+- InterProScan should use a launcher/controller over staged proteomes rather than parallel outer-job submission, because CSC's `cluster_interproscan` already submits cluster work internally
+- the preferred InterProScan controller design is submit-and-poll: the launcher submits one proteome worker, records the returned child job ID, polls that specific job, and launches the next proteome only after completion
 - logs and manifests are lightweight
 - local development should write SLURM scripts for review by default; keep submit code paths available, but do not depend on live Puhti submission outside CSC
 
@@ -320,10 +322,10 @@ Operational recommendations for CSC environments:
 
 These are the most important short-term tasks.
 
-1. Review `busco-slurm` against the current snapshot-first staging model and update any stale path or argument assumptions.
-2. Add regression coverage for BUSCO script generation and the optional submit code path without requiring live Puhti access.
-3. Test BUSCO script generation and submission on CSC/Puhti from a validated `staging_id` when cluster access is available.
-3. Keep the documented command surface limited to implemented workflow steps until new compute commands actually exist.
+1. Test BUSCO script generation and submission on CSC/Puhti from a validated `staging_id` when cluster access is available.
+2. Upgrade `interproscan-slurm` from a write-first scaffold to a real submit-and-poll controller with child job IDs and durable queue-state transitions.
+3. Test InterProScan launcher behavior on Puhti with real `cluster_interproscan` output and verify the queueing model against scheduler limits.
+4. Keep the documented command surface limited to implemented workflow steps until new compute commands actually exist.
 
 ## 10. Practical Guidance For New Developers
 

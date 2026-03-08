@@ -11,10 +11,12 @@ from fungalphylo.cli.commands import restore as restore_cmd
 from fungalphylo.cli.commands import download as download_cmd
 from fungalphylo.cli.commands import stage as stage_cmd
 from fungalphylo.cli.commands import busco_slurm as busco_slurm_cmd
+from fungalphylo.cli.commands import interproscan_slurm as interproscan_slurm_cmd
 
 from fungalphylo.cli.commands import idmap as idmap_cmd
 from fungalphylo.cli.commands import db as db_cmd
 from fungalphylo.cli.commands import status as status_cmd
+from fungalphylo.cli.commands import taxonomy as taxonomy_cmd
 
 
 app = typer.Typer(
@@ -33,12 +35,14 @@ app.add_typer(restore_cmd.app, name="restore")
 app.add_typer(download_cmd.app, name="download")
 app.add_typer(stage_cmd.app, name="stage")
 app.add_typer(busco_slurm_cmd.app, name="busco-slurm")
+app.add_typer(interproscan_slurm_cmd.app, name="interproscan-slurm")
 
 
 # Helpers
 app.add_typer(db_cmd.app, name="db")
 app.add_typer(status_cmd.app, name="status")
 app.add_typer(idmap_cmd.app, name="idmap")
+app.add_typer(taxonomy_cmd.app, name="taxonomy")
 
 
 
