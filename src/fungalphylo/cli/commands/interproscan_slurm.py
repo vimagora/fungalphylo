@@ -105,7 +105,7 @@ def interproscan_slurm_command(
         None, "--limit", min=1, help="Only include the first N staged proteomes in the queue (debugging aid)."
     ),
     fmt: list[str] = typer.Option(
-        ["tsv"],
+        ["TSV"],
         "--format",
         help="InterProScan output format. Repeat the flag to request multiple formats.",
     ),
