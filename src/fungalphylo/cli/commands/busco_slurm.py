@@ -127,6 +127,11 @@ if [ -f "$OUT_DIR/$RUN_NAME/batch_summary.txt" ]; then
   exit 0
 fi
 
+# Run from OUT_DIR so BUSCO writes its log file there, not in the sbatch cwd
+# Also override SLURM_SUBMIT_DIR which some tools use instead of the process cwd
+cd "$OUT_DIR"
+export SLURM_SUBMIT_DIR="$OUT_DIR"
+
 echo "Running BUSCO directory mode"
 echo "Staging ID: $STAGING_ID"
 echo "Input dir: $SEQ_DIR"
