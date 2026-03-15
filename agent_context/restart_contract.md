@@ -176,16 +176,21 @@ Completion proof:
 - `runs` ledger row in SQLite
 
 Skip behavior:
+- the generated script checks for `batch_summary.txt` and exits early if the run already completed
 - none at the workflow level; rerunning regenerates the script
 
 Rerun contract:
 - always safe to rerun
 - operational identity comes from the referenced `staging_id`, not from mutable staged paths
+- `--resume-run-id <run_id>` is the in-place continuation path for an existing BUSCO run; it loads the existing manifest, regenerates the SLURM script with optionally updated parameters (time, cpus, mem, partition), and can optionally re-submit
+- resume mode does not create a new `runs` row or rewrite the manifest; it only refreshes the script
+- do not use `--run-id <existing_run_id>` as a resume path; that mode creates fresh scaffolding and a new manifest
 
 Operator guidance:
 - in local development environments without Puhti access, use `busco-slurm` to write the script for review and manual transfer
 - keep the optional submit path implemented for real CSC usage, but do not make normal development or tests depend on successful `sbatch`
 - batch-mode completion is represented by `runs/<run_id>/busco_results/<batch_root>/batch_summary.txt`
+- if a BUSCO run times out or fails, use `--resume-run-id <run_id>` to refresh the script (e.g. with more time) and resubmit
 
 ## `busco ingest-results`
 

@@ -294,6 +294,14 @@ runs/<run_id>/busco_results/busco_<staging_id>_<run_id>/
   ...
 ```
 
+If a BUSCO run times out or fails, resume the existing run with updated SLURM parameters:
+
+```bash
+fungalphylo busco-slurm /path/to/project --resume-run-id <run_id> --time 48:00:00 --submit
+```
+
+This loads the existing manifest, regenerates the script with the new time limit, and resubmits. The generated script skips execution if `batch_summary.txt` already exists (i.e. the run previously completed).
+
 `busco-slurm` does not import results automatically. After you verify that the BUSCO run completed successfully on Puhti, import the batch summary manually:
 
 ```bash

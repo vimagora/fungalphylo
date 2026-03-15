@@ -189,6 +189,112 @@ def test_busco_slurm_requires_existing_staged_proteomes_dir(tmp_path: Path) -> N
     assert "Missing staged proteomes dir for missing_stage" in result.output
 
 
+def test_busco_slurm_resume_refreshes_script_and_preserves_run(tmp_path: Path, monkeypatch) -> None:
+    """--resume-run-id loads the existing manifest, refreshes the script, and does not create a new runs row."""
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+    _seed_staging(paths, "staging_resume")
+
+    bin_dir = tmp_path / "busco-bin"
+    bin_dir.mkdir()
+    _write_tools_yaml(paths, bin_dir=bin_dir, command="busco-custom")
+
+    monkeypatch.setattr(
+        "fungalphylo.cli.commands.busco_slurm.subprocess.run",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
+    )
+
+    # First: create an initial run
+    result = runner.invoke(
+        app,
+        [
+            "busco-slurm",
+            "--account", "project_1234567",
+            "--run-id", "busco_orig",
+            str(project_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    original_script = (project_dir / "runs/busco_orig/slurm/busco.sbatch").read_text(encoding="utf-8")
+    assert "--time=24:00:00" in original_script
+
+    # Now resume with updated time
+    result = runner.invoke(
+        app,
+        [
+            "busco-slurm",
+            "--resume-run-id", "busco_orig",
+            "--time", "48:00:00",
+            str(project_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Resuming BUSCO run" in result.output
+
+    refreshed_script = (project_dir / "runs/busco_orig/slurm/busco.sbatch").read_text(encoding="utf-8")
+    assert "--time=48:00:00" in refreshed_script
+    assert 'STAGING_ID="staging_resume"' in refreshed_script
+    assert '"busco-custom"' in refreshed_script
+
+    # Verify no second runs row was created
+    conn = connect(paths.db_path)
+    try:
+        run_count = conn.execute("SELECT COUNT(*) AS n FROM runs WHERE kind = 'busco'").fetchone()["n"]
+    finally:
+        conn.close()
+    assert run_count == 1
+
+
+def test_busco_slurm_resume_submit_uses_existing_script(tmp_path: Path, monkeypatch) -> None:
+    """--resume-run-id --submit resubmits the refreshed script."""
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+    _seed_staging(paths, "staging_resub")
+
+    bin_dir = tmp_path / "busco-bin"
+    bin_dir.mkdir()
+    _write_tools_yaml(paths, bin_dir=bin_dir)
+
+    calls: list[list[str]] = []
+
+    def _fake_run(args, check, capture_output, text):
+        calls.append(args)
+        return SimpleNamespace(stdout="Submitted batch job 99999\n")
+
+    # Create initial run without submit
+    monkeypatch.setattr(
+        "fungalphylo.cli.commands.busco_slurm.subprocess.run",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
+    )
+    result = runner.invoke(
+        app,
+        [
+            "busco-slurm",
+            "--account", "project_1234567",
+            "--run-id", "busco_resub",
+            str(project_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    # Resume with submit
+    monkeypatch.setattr("fungalphylo.cli.commands.busco_slurm.subprocess.run", _fake_run)
+    result = runner.invoke(
+        app,
+        [
+            "busco-slurm",
+            "--resume-run-id", "busco_resub",
+            "--submit",
+            str(project_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Submitted batch job 99999" in result.output
+    expected_script = str(project_dir / "runs/busco_resub/slurm/busco.sbatch")
+    assert calls == [["sbatch", expected_script]]
+
+
 def test_infer_account_from_project_dir_uses_scratch_prefix() -> None:
     assert infer_account_from_project_dir(Path("/scratch/project_2015320/myproj")) == "project_2015320"
     assert infer_account_from_project_dir(Path("/tmp/myproj")) is None
