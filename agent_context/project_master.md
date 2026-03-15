@@ -82,6 +82,9 @@ A full real-data validation run has now completed successfully through `stage`, 
   - reuses equivalent prior artifacts by cache key instead of regenerating them
 - `busco-slurm`
   - writes a Puhti-oriented SLURM script to run BUSCO on a chosen `staging_id`
+- `interproscan-slurm`
+  - writes launcher/controller/worker SLURM scaffolding plus `queue.tsv` for staged proteomes
+  - can resume an existing run in place with `--resume-run-id <run_id>` without rewriting the queue ledger
 
 ### Database shape
 
@@ -145,6 +148,7 @@ The project already has useful skip behavior:
 - `fetch-index` can reuse cached JSON
 - `download` can skip if raw files exist or if approved file IDs are already represented in staging snapshots
 - `stage` can reuse equivalent artifacts by cache key across snapshots
+- `interproscan-slurm` can now resume an existing run in place by preserving `queue.tsv` and refreshing the launcher/controller scripts for the saved `run_id`
 - `markers.py` provides `STARTED`/`DONE` helpers for future run-level checkpointing
 
 The restart contract is now documented in `docs/restart_contract.md`, but a few implementation boundaries remain open:
@@ -163,6 +167,7 @@ Recent improvements in this area:
 - `download` records manifest mismatches in `unmatched_manifest.tsv`, and the directory-creation path for that report is now covered by tests
 - restore/download batch summaries are now indexed in SQLite (`restore_requests`, `download_requests`) while filesystem request directories remain the source of truth
 - malformed non-zip download responses and extracted bundles with no manifest are now covered by command-level tests and recorded as failed batches
+- `interproscan-slurm` now uses the current Python interpreter in the generated launcher, which avoids missing-dependency failures when resubmitting the launcher manually on Puhti
 
 ### 4.4 CLI and docs do not fully agree
 
@@ -228,6 +233,7 @@ Least reliable areas:
 - remaining long-running command semantics outside the newly-tested paths
 - broader regression coverage
 - downstream BUSCO script generation/submission has not yet received the same real-data validation
+- the new InterProScan in-place resume path still needs confirmation from a live Puhti timeout/restart cycle
 - residual drift between implementation and older onboarding notes
 
 ## 6. Maintainability Assessment

@@ -74,6 +74,8 @@ The main risks are not scale-related. They are semantic drift and incomplete res
 - `interproscan-slurm` now uses a true submit-and-poll controller that records child job IDs in `queue.tsv` and advances one proteome at a time.
 - `interproscan-slurm` now loads Puhti modules (`biokit`, `interproscan`) inside the worker job before running `cluster_interproscan`; `interproscan.bin_dir` is optional.
 - `interproscan-slurm` now supports `--limit` for debug-sized runs and, on the current Puhti wrapper path, constrains output to a single explicit `TSV` file per proteome.
+- `interproscan-slurm` now supports `--resume-run-id <run_id>` to continue an existing run in place without rewriting `queue.tsv`; this is the safe resume path after launcher timeout/interrupts.
+- the generated InterProScan launcher now uses the same Python interpreter that wrote the run, avoiding failures from a bare `python3` lacking project dependencies.
 - In this local development environment, compute commands should default to writing SLURM scripts only; keep explicit submit support in code, but do not rely on live Puhti submission during development or tests.
 - `autoselect` now honors config-driven scoring weights and configurable ban patterns.
 - `db` now enforces read-only SQL and opens SQLite in read-only mode.
@@ -118,6 +120,7 @@ The active implementation work is to make every relevant command and document ho
 - `download` now verifies raw-file `md5` when source metadata provides it, but staged-snapshot skips are still source-file-ID based
 - the explicit restart contract now lives in `docs/restart_contract.md`; keep that file aligned with command behavior
 - the next practical milestone is to validate the manual BUSCO result-import workflow and the upgraded InterProScan controller on CSC/Puhti
+- a real-data InterProScan validation run on CSC/Puhti is currently in progress; preserve its `run_id` and `queue.tsv` if additional resume/debugging is needed
 
 ## Working Principles For Changes
 

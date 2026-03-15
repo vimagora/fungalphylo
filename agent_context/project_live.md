@@ -7,6 +7,7 @@ This is the working status board for developers. It is intentionally short and o
 - Intake workflow is implemented through `stage`.
 - BUSCO SLURM script generation exists.
 - BUSCO batch-summary import into SQLite exists via `busco ingest-results`.
+- InterProScan runs can now be resumed in place with `interproscan-slurm --resume-run-id <run_id>`.
 - OrthoFinder/species-tree/family compute runs are not implemented.
 - The current pytest suite covers staging snapshots, cache-ingest behavior, autoselect scoring/config behavior, db read-only enforcement, FASTA roundtrips, ID map loading, and raw path resolution.
 - Code compiles with `python -m compileall src`.
@@ -28,6 +29,8 @@ This is the working status board for developers. It is intentionally short and o
 - the generated InterProScan worker job now loads Puhti modules with `module load biokit` and `module load interproscan`; `interproscan.bin_dir` is optional and only prepended to `PATH` if explicitly configured.
 - `interproscan-slurm` now supports `--limit` to include only the first `N` staged proteomes in the queue for debugging.
 - `interproscan-slurm` now constrains the current Puhti wrapper path to a single explicit `TSV` output file per proteome.
+- `interproscan-slurm` now supports `--resume-run-id <run_id>` so an existing run can refresh launcher/controller scripts, preserve `queue.tsv`, and resubmit cleanly after timeout/interruption.
+- the generated InterProScan launcher now uses the same Python interpreter that wrote the run instead of a bare `python3`, fixing missing-dependency failures during manual `sbatch` resume.
 - the broken duplicate path helper in `src/fungalphylo/core/paths.py` was removed.
 - README has been updated to the snapshot-first model.
 - `fetch-index --ingest-from-cache` no longer requires JGI authentication.
@@ -66,6 +69,7 @@ This is the working status board for developers. It is intentionally short and o
 - BUSCO batch summary import and taxonomy mockup generation
 - InterProScan launcher/controller/worker/queue generation
 - large real-data intake through `stage`
+- InterProScan queue-ledger resume from an existing `run_id`
 
 ## Immediate Missing Work
 
@@ -78,6 +82,7 @@ This is the working status board for developers. It is intentionally short and o
 - validate the manual BUSCO result-import workflow on CSC/Puhti using the validated staged outputs when cluster access is available
 - test the upgraded InterProScan controller on Puhti with real `cluster_interproscan` output and verify that one-proteome-at-a-time queueing avoids scheduler limit issues
 - confirm the generated module-load path (`biokit`, `interproscan`) and the TSV-only output contract on Puhti
+- monitor the current real-data InterProScan validation run and record whether `--resume-run-id` behaves cleanly after real scheduler timeouts
 
 ### Maintainability
 
@@ -93,7 +98,7 @@ This is the working status board for developers. It is intentionally short and o
 ## Suggested Work Order
 
 1. Validate BUSCO script generation, cluster completion, and manual `busco ingest-results` on CSC/Puhti using validated staging outputs.
-2. Test the upgraded InterProScan queue controller on Puhti with real `cluster_interproscan` output.
+2. Finish the current real-data InterProScan run and record whether `--resume-run-id` handles timeout recovery cleanly.
 3. Confirm the Puhti module-load path and worker-memory behavior, including `--limit` debug runs and GFF3 output.
 4. Only then implement additional compute steps.
 

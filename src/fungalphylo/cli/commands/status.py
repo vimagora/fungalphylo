@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -239,12 +240,202 @@ def status_command(
     console.print()
 
     if latest_staging:
+        sid = latest_staging["staging_id"]
         console.print("[bold]Latest staging:[/bold]")
-        console.print(f"  id: {latest_staging['staging_id']}")
+        console.print(f"  id: {sid}")
         console.print(f"  created_at: {latest_staging['created_at']}")
         console.print(f"  manifest: {project_dir / latest_staging['manifest_path']}")
-        console.print(f"  proteomes: {paths.staging_proteomes_dir(latest_staging['staging_id'])}")
-        console.print(f"  cds: {paths.staging_cds_dir(latest_staging['staging_id'])}")
-        console.print(f"  checksums: {paths.staging_checksums(latest_staging['staging_id'])}")
+        console.print(f"  proteomes: {paths.staging_proteomes_dir(sid)}")
+        console.print(f"  cds: {paths.staging_cds_dir(sid)}")
+        console.print(f"  checksums: {paths.staging_checksums(sid)}")
+
+        # Show staging artifact counts
+        conn2 = connect(paths.db_path)
+        try:
+            sf_count = conn2.execute(
+                "SELECT COUNT(*) AS n FROM staging_files WHERE staging_id = ?", (sid,)
+            ).fetchone()["n"]
+            sf_reused = conn2.execute(
+                "SELECT COUNT(*) AS n FROM staging_files WHERE staging_id = ? AND reused_from_staging_id IS NOT NULL",
+                (sid,),
+            ).fetchone()["n"]
+        finally:
+            conn2.close()
+        console.print(f"  artifacts: {sf_count} (reused: {sf_reused})")
+
+        # Check manifest for failures
+        manifest_path = project_dir / latest_staging["manifest_path"]
+        if manifest_path.exists():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            failures = manifest.get("failures") or []
+            if failures:
+                console.print(f"  [red]staging failures: {len(failures)}[/red]")
+                for f in failures[:5]:
+                    console.print(f"    {f['portal_id']}: {f['reason']}")
+                if len(failures) > 5:
+                    console.print(f"    ... and {len(failures) - 5} more")
     else:
         console.print("[bold]Latest staging:[/bold] -")
+
+
+failures_app = typer.Typer(help="Inspect recent failures across restore, download, stage, and error logs.")
+
+
+@failures_app.callback(invoke_without_command=True)
+def failures_command(
+    ctx: typer.Context,
+    project_dir: Path = typer.Argument(None, help="Project directory"),
+    last_n: int = typer.Option(50, "--last", help="Number of recent error log entries to show"),
+) -> None:
+    """Inspect recent failures across restore, download, stage, and error logs."""
+    if ctx.invoked_subcommand is not None:
+        return
+    if project_dir is None:
+        raise typer.BadParameter("PROJECT_DIR is required.")
+    project_dir = project_dir.expanduser().resolve()
+    paths = ProjectPaths(project_dir)
+    ensure_project_dirs(paths)
+    init_db(paths.db_path)
+
+    found_any = False
+
+    # 1. Failed or partial restore/download batches
+    conn = connect(paths.db_path)
+    try:
+        bad_restores = conn.execute(
+            """
+            SELECT request_id, created_at, status, n_payloads, n_posted, n_errors
+            FROM restore_requests
+            WHERE status IN ('partial', 'failed')
+            ORDER BY created_at DESC
+            LIMIT 5
+            """
+        ).fetchall()
+        bad_downloads = conn.execute(
+            """
+            SELECT request_id, created_at, status, n_payloads, n_payload_ok, n_errors, moved_files, missing_files
+            FROM download_requests
+            WHERE status IN ('partial', 'failed')
+            ORDER BY created_at DESC
+            LIMIT 5
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if bad_restores:
+        found_any = True
+        t = RichTable(title="Failed/Partial Restore Batches", show_lines=False)
+        t.add_column("request_id")
+        t.add_column("created_at")
+        t.add_column("status")
+        t.add_column("payloads", justify="right")
+        t.add_column("posted", justify="right")
+        t.add_column("errors", justify="right")
+        for r in bad_restores:
+            t.add_row(
+                r["request_id"], r["created_at"], r["status"],
+                str(r["n_payloads"]), str(r["n_posted"]), str(r["n_errors"]),
+            )
+        console.print(t)
+        console.print()
+
+    if bad_downloads:
+        found_any = True
+        t = RichTable(title="Failed/Partial Download Batches", show_lines=False)
+        t.add_column("request_id")
+        t.add_column("created_at")
+        t.add_column("status")
+        t.add_column("payloads", justify="right")
+        t.add_column("ok", justify="right")
+        t.add_column("errors", justify="right")
+        t.add_column("moved", justify="right")
+        t.add_column("missing", justify="right")
+        for r in bad_downloads:
+            t.add_row(
+                r["request_id"], r["created_at"], r["status"],
+                str(r["n_payloads"]), str(r["n_payload_ok"]), str(r["n_errors"]),
+                str(r["moved_files"]), str(r["missing_files"]),
+            )
+        console.print(t)
+        console.print()
+
+    # 2. Latest staging manifest failures
+    conn = connect(paths.db_path)
+    try:
+        latest_staging = conn.execute(
+            "SELECT staging_id, manifest_path FROM stagings ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if latest_staging:
+        manifest_path = project_dir / latest_staging["manifest_path"]
+        if manifest_path.exists():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            failures = manifest.get("failures") or []
+            if failures:
+                found_any = True
+                t = RichTable(
+                    title=f"Staging Failures ({latest_staging['staging_id']})",
+                    show_lines=False,
+                )
+                t.add_column("portal_id")
+                t.add_column("reason")
+                for f in failures:
+                    t.add_row(f["portal_id"], f["reason"])
+                console.print(t)
+                console.print()
+
+        # Check for failed_portals.tsv
+        failed_report = paths.staging_reports_dir(latest_staging["staging_id"]) / "failed_portals.tsv"
+        if failed_report.exists():
+            console.print(f"[dim]Detailed staging failure report:[/dim] {failed_report}")
+            console.print()
+
+    # 3. Recent errors from errors.jsonl
+    errors_log = paths.errors_log
+    if errors_log.exists():
+        lines: List[str] = []
+        with errors_log.open("r", encoding="utf-8") as f:
+            for line in f:
+                lines.append(line)
+        recent = lines[-last_n:] if len(lines) > last_n else lines
+        if recent:
+            found_any = True
+            records = []
+            for line in recent:
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+            # Summary by event type
+            event_counts: Counter[str] = Counter()
+            for rec in records:
+                event_counts[rec.get("event", "unknown")] += 1
+
+            t = RichTable(title=f"Recent Error Log ({len(records)} entries)", show_lines=False)
+            t.add_column("event")
+            t.add_column("count", justify="right")
+            for event, count in event_counts.most_common():
+                t.add_row(event, str(count))
+            console.print(t)
+            console.print()
+
+            # Show last few errors with detail
+            show_n = min(5, len(records))
+            console.print(f"[bold]Last {show_n} errors:[/bold]")
+            for rec in records[-show_n:]:
+                ts = rec.get("ts", "?")
+                event = rec.get("event", "?")
+                portal = rec.get("portal_id", "")
+                exc_type = rec.get("exc_type", "")
+                exc_msg = rec.get("exc_msg", "")
+                portal_str = f" [{portal}]" if portal else ""
+                console.print(f"  {ts}  {event}{portal_str}  {exc_type}: {exc_msg}")
+            console.print()
+            console.print(f"[dim]Full error log:[/dim] {errors_log}")
+
+    if not found_any:
+        console.print("[green]No failures found.[/green]")

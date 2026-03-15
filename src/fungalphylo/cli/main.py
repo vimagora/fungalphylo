@@ -43,6 +43,7 @@ app.add_typer(interproscan_slurm_cmd.app, name="interproscan-slurm")
 # Helpers
 app.add_typer(db_cmd.app, name="db")
 app.add_typer(status_cmd.app, name="status")
+app.add_typer(status_cmd.failures_app, name="failures")
 app.add_typer(idmap_cmd.app, name="idmap")
 app.add_typer(taxonomy_cmd.app, name="taxonomy")
 
