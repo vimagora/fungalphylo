@@ -8,7 +8,7 @@ A reproducible, user-friendly phylogenomics pipeline for fungal datasets built a
 - **JGI Files API** for file discovery, restore, and download
 - **TSV review loop** for human-in-the-loop selection
 
-The explicit rerun/completion contract for implemented commands is documented in `docs/restart_contract.md`.
+The explicit rerun/completion contract for implemented commands is documented in `agent_context/restart_contract.md`.
 
 This repo is designed so **download is I/O only** (keeps raw artifacts), while **stage** performs normalization (IDs, filtering, mapping manifests).
 
@@ -18,7 +18,7 @@ This repo is designed so **download is I/O only** (keeps raw artifacts), while *
 
 - Python **3.11+**
 - Packages (installed via `pyproject.toml`):
-  - `typer`, `pydantic`, `pyyaml`, `openpyxl`, `requests`, `rich`
+  - `typer`, `pyyaml`, `openpyxl`, `requests`, `rich`
 
 ---
 
@@ -271,6 +271,7 @@ Mapping lookup is **primary by exact original_header** (most reliable), with opt
 
 - `--dry-run` on staging/download/restore to build payloads and validate inputs without executing.
 - `--continue-on-error` (where supported) to process large batches without stopping.
+- `fungalphylo failures /path/to/project` to inspect failed/partial batches, staging failures, and recent error log entries.
 
 For BUSCO on Puhti / SLURM:
 
