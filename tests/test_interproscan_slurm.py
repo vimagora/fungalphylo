@@ -437,6 +437,163 @@ def test_interproscan_slurm_rejects_non_tsv_formats_for_puhti_wrapper(tmp_path: 
     assert "TSV" in result.output
 
 
+def test_interproscan_slurm_controller_includes_retry_failed_sequences(tmp_path: Path) -> None:
+    """Verify the generated controller has retry_failed_sequences logic and is valid Python."""
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+    _seed_staging(paths, "staging1")
+
+    bin_dir = tmp_path / "ipr-bin"
+    bin_dir.mkdir()
+    _write_tools_yaml(paths, bin_dir=bin_dir)
+
+    result = runner.invoke(
+        app,
+        [
+            "interproscan-slurm",
+            "--account",
+            "project_1234567",
+            "--staging-id",
+            "staging1",
+            "--run-id",
+            "ipr_retry",
+            str(project_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    controller = project_dir / "runs" / "ipr_retry" / "scripts" / "interproscan_controller.py"
+    controller_text = controller.read_text(encoding="utf-8")
+
+    # Verify retry logic is present
+    assert "def retry_failed_sequences" in controller_text
+    assert ".failed_sequences" in controller_text
+    assert "retry_failed_sequences()" in controller_text
+    assert ".failed_sequences." in controller_text  # numbered backup rotation
+
+    # Verify the generated script is valid Python
+    compile(controller_text, str(controller), "exec")
+
+
+def test_interproscan_slurm_retry_failed_sequences_appends_results(tmp_path: Path) -> None:
+    """Simulate the retry logic: rotate .failed_sequences, append results, clean up."""
+    import importlib
+    import types
+
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+    _seed_staging(paths, "staging1")
+
+    bin_dir = tmp_path / "ipr-bin"
+    bin_dir.mkdir()
+    _write_tools_yaml(paths, bin_dir=bin_dir)
+
+    result = runner.invoke(
+        app,
+        [
+            "interproscan-slurm",
+            "--account",
+            "project_1234567",
+            "--staging-id",
+            "staging1",
+            "--run-id",
+            "ipr_retry_sim",
+            str(project_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    # Set up: mark both portals as completed in queue
+    queue = project_dir / "runs" / "ipr_retry_sim" / "queue.tsv"
+    with queue.open("r", encoding="utf-8", newline="") as f:
+        rows = list(csv.DictReader(f, delimiter="\t"))
+    for row in rows:
+        row["status"] = "completed"
+        row["submitted_job_id"] = "99999"
+    with queue.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=rows[0].keys(), delimiter="\t")
+        writer.writeheader()
+        writer.writerows(rows)
+
+    # Create main TSV and .failed_sequences for PortalA only
+    results_dir = Path(rows[0]["results_dir"])
+    results_dir.mkdir(parents=True, exist_ok=True)
+    tsv_path = Path(rows[0]["tsv_path"])
+    tsv_path.write_text("col1\tcol2\noriginal_line\tdata\n", encoding="utf-8")
+    failed_path = Path(f"{tsv_path}.failed_sequences")
+    failed_path.write_text(">PortalA|999\nMPEPTIDESEQ\n", encoding="utf-8")
+
+    # Also create PortalB's TSV (no failed_sequences — should be untouched)
+    results_dir_b = Path(rows[1]["results_dir"])
+    results_dir_b.mkdir(parents=True, exist_ok=True)
+    tsv_path_b = Path(rows[1]["tsv_path"])
+    tsv_path_b.write_text("col1\tcol2\nportalb_line\tdata\n", encoding="utf-8")
+
+    # Load the generated controller as a module so we can test retry_failed_sequences
+    controller = project_dir / "runs" / "ipr_retry_sim" / "scripts" / "interproscan_controller.py"
+    controller_text = controller.read_text(encoding="utf-8")
+
+    # Patch submit_row and wait_for_terminal_state in the controller source
+    # so they don't actually call sbatch/squeue/sacct
+    patched = controller_text.replace(
+        "def main() -> int:",
+        # Inject stubs before main
+        "def _real_submit_row(row):\n"
+        "    raise AssertionError('should not reach real submit')\n\n"
+        "def main() -> int:",
+    )
+
+    # Load controller module
+    spec = importlib.util.spec_from_loader("controller_test", loader=None)
+    mod = types.ModuleType("controller_test")
+    mod.__spec__ = spec
+    exec(compile(patched, str(controller), "exec"), mod.__dict__)
+
+    # Stub submit_row to return a fake job ID
+    mod.submit_row = lambda row: "55555"
+    # Stub wait_for_terminal_state to return COMPLETED
+    mod.wait_for_terminal_state = lambda job_id: "COMPLETED"
+
+    # Create the retry output that the worker would produce
+    retry_output = Path(f"{tsv_path}.retry_1")
+
+    # We need the worker to "produce" the retry output before the controller reads it.
+    # Patch submit_row to also create the retry output file.
+    def fake_submit(row):
+        out = Path(row["tsv_path"])
+        out.write_text("retry_col1\tretry_col2\nretried_line\trecovered\n", encoding="utf-8")
+        return "55555"
+
+    mod.submit_row = fake_submit
+
+    rc = mod.retry_failed_sequences()
+    assert rc == 0
+
+    # Verify: .failed_sequences rotated to .failed_sequences.1
+    assert not failed_path.exists(), ".failed_sequences should be rotated away"
+    rotated = Path(f"{tsv_path}.failed_sequences.1")
+    assert rotated.exists(), ".failed_sequences.1 should exist as audit trail"
+    assert ">PortalA|999" in rotated.read_text(encoding="utf-8")
+
+    # Verify: retry results appended to main TSV
+    final_tsv = tsv_path.read_text(encoding="utf-8")
+    assert "original_line" in final_tsv
+    assert "retried_line" in final_tsv
+
+    # Verify: retry temp file cleaned up
+    assert not retry_output.exists()
+
+    # Verify: PortalB untouched (no .failed_sequences)
+    assert tsv_path_b.read_text(encoding="utf-8") == "col1\tcol2\nportalb_line\tdata\n"
+
+    # Verify: queue.tsv updated with retry note
+    with queue.open("r", encoding="utf-8", newline="") as f:
+        final_rows = list(csv.DictReader(f, delimiter="\t"))
+    portal_a_row = [r for r in final_rows if r["portal_id"] == "PortalA"][0]
+    assert "retry 1 done" in portal_a_row["note"]
+    assert "all sequences recovered" in portal_a_row["note"]
+
+
 def test_interproscan_slurm_requires_existing_staging_dir(tmp_path: Path) -> None:
     project_dir = tmp_path / "project"
     paths = _init_project(project_dir)

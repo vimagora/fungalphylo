@@ -139,6 +139,35 @@ class ProjectPaths:
     def run_marker_done(self, run_id: str) -> Path:
         return self.run_dir(run_id) / "DONE"
 
+    # --- gene families ---
+    @property
+    def families_root(self) -> Path:
+        return self.root / "families"
+
+    def family_dir(self, family_id: str) -> Path:
+        return self.families_root / family_id
+
+    def family_characterized_dir(self, family_id: str) -> Path:
+        return self.family_dir(family_id) / "characterized"
+
+    def family_config_dir(self, family_id: str) -> Path:
+        return self.family_dir(family_id) / "config"
+
+    def family_selected_dir(self, family_id: str) -> Path:
+        return self.family_dir(family_id) / "selected"
+
+    def family_fasta_dir(self, family_id: str) -> Path:
+        return self.family_dir(family_id) / "fasta"
+
+    def family_alignment_dir(self, family_id: str) -> Path:
+        return self.family_dir(family_id) / "alignment"
+
+    def family_tree_dir(self, family_id: str) -> Path:
+        return self.family_dir(family_id) / "tree"
+
+    def family_manifest(self, family_id: str) -> Path:
+        return self.family_dir(family_id) / "manifest.json"
+
 
 def ensure_project_dirs(p: ProjectPaths) -> None:
     """

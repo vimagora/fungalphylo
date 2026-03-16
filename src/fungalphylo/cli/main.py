@@ -13,6 +13,7 @@ from fungalphylo.cli.commands import stage as stage_cmd
 from fungalphylo.cli.commands import busco as busco_cmd
 from fungalphylo.cli.commands import busco_slurm as busco_slurm_cmd
 from fungalphylo.cli.commands import interproscan_slurm as interproscan_slurm_cmd
+from fungalphylo.cli.commands import protsetphylo as protsetphylo_cmd
 
 from fungalphylo.cli.commands import idmap as idmap_cmd
 from fungalphylo.cli.commands import db as db_cmd
@@ -38,6 +39,7 @@ app.add_typer(stage_cmd.app, name="stage")
 app.add_typer(busco_cmd.app, name="busco")
 app.add_typer(busco_slurm_cmd.app, name="busco-slurm")
 app.add_typer(interproscan_slurm_cmd.app, name="interproscan-slurm")
+app.add_typer(protsetphylo_cmd.app, name="protsetphylo")
 
 
 # Helpers

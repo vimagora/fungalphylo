@@ -1,352 +1,432 @@
 # fungalphylo
 
-A reproducible, user-friendly phylogenomics pipeline for fungal datasets built around:
+A reproducible phylogenomics pipeline for fungal datasets. Handles everything from JGI data intake through staging, quality control, and gene family phylogenetics.
 
-- **SQLite** for state/approvals (what exists + what’s approved)
-- **Immutable staging snapshots** (`staging_id`) for normalized inputs
-- **Snakemake** for compute steps (later)
+Built around:
+
+- **SQLite** for state tracking and approvals
+- **Immutable staging snapshots** for normalized inputs
+- **SLURM script generation** for HPC compute (CSC/Puhti)
 - **JGI Files API** for file discovery, restore, and download
-- **TSV review loop** for human-in-the-loop selection
-
-The explicit rerun/completion contract for implemented commands is documented in `agent_context/restart_contract.md`.
-
-This repo is designed so **download is I/O only** (keeps raw artifacts), while **stage** performs normalization (IDs, filtering, mapping manifests).
+- **TSV review loop** for human-in-the-loop file selection
 
 ---
 
-## Requirements
-
-- Python **3.11+**
-- Packages (installed via `pyproject.toml`):
-  - `typer`, `pyyaml`, `openpyxl`, `requests`, `rich`
-
----
-
-## Install
+## Quick Start
 
 ```bash
-python -m venv .venv
-# Linux/macOS
-source .venv/bin/activate
-# Windows PowerShell
-# .\.venv\Scripts\Activate.ps1
-
-pip install -U pip
+# Install
+python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
+
+# Initialize a project (data directory, separate from this repo)
+fungalphylo init /scratch/project_xxx/myproject
+```
+
+Requires Python **3.11+**. Dependencies: `typer`, `pyyaml`, `openpyxl`, `requests`, `rich`.
+
+---
+
+## Pipeline Overview
+
+The pipeline has two main tracks:
+
+### Data Intake Track
+```
+init → ingest → fetch-index → autoselect → review → restore → download → stage
+```
+
+### Compute Track (after staging)
+```
+busco-slurm          # Quality control
+interproscan-slurm   # Domain annotation
+protsetphylo         # Gene family phylogenomics (new)
 ```
 
 ---
 
-## Authentication (JGI)
+## Project Directory Layout
 
-Set your JGI session token as an environment variable.
-
-### Linux/macOS
-```bash
-export JGI_TOKEN="/api/sessions/<your_token_here>"
-```
-
-### Windows PowerShell
-```powershell
-$env:JGI_TOKEN="/api/sessions/<your_token_here>"
-```
-
-You can also pass `--token` to commands that support it.
-
----
-
-## Project layout (created by `init`)
-
-A fungalphylo **project directory** is separate from the repo (code). Example:
+A fungalphylo **project directory** is separate from the code repo:
 
 ```
 project/
-  config.yaml
-  tools.yaml
-  db/fungalphylo.sqlite
-  raw/                         # downloaded originals (backup)
-  staging/<staging_id>/        # immutable normalized snapshot
-  runs/<run_id>/               # compute runs (later)
-  review/                      # human-editable TSVs
-  cache/jgi_index_json/        # cached JGI search responses
-  logs/events.jsonl
-  logs/errors.jsonl
-  restore_requests/<timestamp>/
-  download_requests/<timestamp>/
+  config.yaml                        # Project configuration
+  tools.yaml                         # External tool paths (BUSCO, InterProScan, MAFFT, etc.)
+  db/fungalphylo.sqlite              # State database
+  raw/<portal_id>/<file_id>/         # Downloaded originals
+  staging/<staging_id>/              # Immutable normalized snapshots
+  runs/<run_id>/                     # Compute runs (BUSCO, IPR, alignment, tree)
+  families/<family_id>/              # Gene family analyses
+  review/                            # Human-editable TSVs
+  cache/jgi_index_json/              # Cached JGI responses
+  logs/events.jsonl                  # Action log
+  logs/errors.jsonl                  # Error log
+  restore_requests/<timestamp>/      # JGI restore batches
+  download_requests/<timestamp>/     # JGI download batches
 ```
 
 ---
 
-## Typical workflow (end-to-end)
+## Data Intake Workflow
 
-### 1) Initialize a project
+### 1. Initialize a project
 
 ```bash
 fungalphylo init /path/to/project --force
 ```
 
-### 2) Ingest MycoCosm portal list (XLSX)
+### 2. Ingest portal list
 
-Your MycoCosm spreadsheet contains hyperlinks in `Name` (portal URL) and `Published` (paper URL).
+Import a MycoCosm spreadsheet (XLSX with hyperlinked `Name` and `Published` columns):
 
 ```bash
 fungalphylo ingest /path/to/project --table mycocosm_portals.xlsx
 ```
 
-This populates `portals` including:
-- `portal_id` inferred from the `Name` hyperlink
-- `is_published`, `published_text`, `published_url`
-
-### 3) Fetch file index from JGI (portal_files)
+### 3. Fetch file index from JGI
 
 ```bash
 fungalphylo fetch-index /path/to/project
-# or limit to portals
+# Single portal
 fungalphylo fetch-index /path/to/project --portal-id Dicsqu464_2
-```
-
-This:
-- caches raw JSON: `cache/jgi_index_json/<portal_id>.json`
-- upserts file rows into `portal_files`
-- stores `dataset_id` and `top_hit_id` on `portals` (used for restore/download)
-
-If you already have cache files and only want to ingest them into the DB:
-
-```bash
+# From cached JSON only (no network)
 fungalphylo fetch-index /path/to/project --ingest-from-cache
 ```
 
-### 4) Autoselect best proteome + CDS (explainable)
+### 4. Auto-select best proteome + CDS
 
-Heuristics include (current defaults):
-- prefer `data_group=genome`
-- prefer `jat_label`: proteins_filtered/cds_filtered (fallback transcripts_filtered)
-- avoid `deflines`, `promoter`, `alleles`
-- avoid gff
-- prefer `file_format=fasta`
-- prefer newer files
-
-These defaults are now configurable in `config.yaml` under `autoselect.weights` and `autoselect.ban_patterns`.
+Heuristic scoring (configurable in `config.yaml`): prefers genome-group files, filtered proteins/CDS, FASTA format, newer files; avoids deflines, promoters, alleles, GFF.
 
 ```bash
 fungalphylo autoselect /path/to/project
 ```
 
-Outputs in `review/`:
-- `autoselect_<ts>.tsv` (one row/portal, chosen IDs)
-- `autoselect_explain_<ts>.tsv` (top-N candidates + scoring breakdown)
+Outputs `review/autoselect_<ts>.tsv` and `review/autoselect_explain_<ts>.tsv`.
 
-### 5) Review / override selections and apply approvals
-
-Export an editable TSV from the autoselect output:
+### 5. Review and apply selections
 
 ```bash
+# Export editable TSV
 fungalphylo review export /path/to/project --from-autoselect review/autoselect_<ts>.tsv
-```
 
-Edit the resulting `review_edit_<ts>.tsv`:
-- change `proteome_file_id` or `cds_file_id`
-- set `approve=no` to exclude a portal
+# Edit review_edit_<ts>.tsv: change file IDs, set approve=no to exclude portals
 
-Apply to DB approvals:
-
-```bash
+# Apply approvals to DB
 fungalphylo review apply /path/to/project review/review_edit_<ts>.tsv
 ```
 
-### 5b) Curate NCBI taxon IDs
-
-If you want a curated taxonomy mapping for later completeness-by-taxon analysis, apply a TSV with `portal_id` and `ncbi_taxon_id`:
+### 6. Restore files (can take hours/days)
 
 ```bash
+fungalphylo restore /path/to/project --send-mail
+# Preview without posting
+fungalphylo restore /path/to/project --dry-run
+```
+
+Payloads are chunked to stay under backend character limits. Use `--continue-on-error` for large batches.
+
+### 7. Download approved files
+
+```bash
+fungalphylo download /path/to/project
+# Skip already-downloaded files
+fungalphylo download /path/to/project --skip-if-raw-present
+```
+
+Downloads are saved to `raw/<portal_id>/<file_id>/<filename>`.
+
+### 8. Stage (normalize + map)
+
+Creates an immutable snapshot with canonical headers (`{portal_id}|{jgi_protein_id}`):
+
+```bash
+fungalphylo stage /path/to/project --dry-run   # Preview
+fungalphylo stage /path/to/project              # Create snapshot
+```
+
+Outputs:
+- `staging/<staging_id>/proteomes/<portal_id>.faa`
+- `staging/<staging_id>/cds/<portal_id>.fna`
+- `staging/<staging_id>/manifest.json`, `checksums.tsv`
+
+Each run creates a new `staging_id`. Equivalent artifacts are reused by cache key.
+
+#### Non-JGI headers
+
+Some portals have non-standard FASTA headers. These require a per-portal ID mapping file (TSV with `canonical_protein_id`, `model_id`, `original_header`). Place in `idmaps/`.
+
+---
+
+## Compute: BUSCO
+
+Quality control on staged proteomes:
+
+```bash
+# Generate SLURM script (latest staging by default)
+fungalphylo busco-slurm /path/to/project --staging-id <staging_id>
+
+# Resume a timed-out run with more time
+fungalphylo busco-slurm /path/to/project --resume-run-id <run_id> --time 48:00:00 --submit
+
+# Import results after completion
+fungalphylo busco ingest-results /path/to/project --run-id <run_id>
+```
+
+Use `--submit` only on systems with `sbatch`. The generated script checks for prior completion and exits early if already done.
+
+---
+
+## Compute: InterProScan
+
+Domain annotation on staged proteomes:
+
+```bash
+# Generate launcher + worker scripts
+fungalphylo interproscan-slurm /path/to/project --application PfamA
+
+# Resume after timeout
+fungalphylo interproscan-slurm /path/to/project --resume-run-id <run_id> --submit
+
+# Debug with subset
+fungalphylo interproscan-slurm /path/to/project --limit 5
+```
+
+The launcher runs a submit-and-poll controller (one worker at a time to respect Puhti job limits). The worker loads `biokit` and `interproscan` modules. Failed sequences are automatically retried on resume.
+
+---
+
+## Compute: Gene Family Phylogenomics (`protsetphylo`)
+
+Analyze specific gene families (e.g., MFS sugar transporters) across your staged proteomes.
+
+### Pipeline
+
+```
+protsetphylo init → interproscan → select → build-fasta → align → tree
+```
+
+### Step-by-step
+
+#### 1. Initialize a gene family
+
+Provide a TSV of characterized proteins and target Pfam accessions:
+
+```bash
+fungalphylo protsetphylo init /path/to/project \
+  --family-id mfs_sugar \
+  --characterized characterized_proteins.tsv \
+  --pfam PF00083
+```
+
+The characterized TSV must have columns: `portal_id`, `species`, `short_name`, `protein_name`, `sequence`. Optional: `protein_id`, `group_*`, `references`.
+
+- `portal_id` can be blank for proteins not in your project (e.g., outgroup sequences)
+- Multiple `--pfam` flags or `--pfam-list pfams.txt` for multi-domain families
+
+Creates `families/<family_id>/` with preserved TSV, generated FASTA, and Pfam config.
+
+#### 2. Run InterProScan on characterized proteins
+
+```bash
+fungalphylo protsetphylo interproscan /path/to/project \
+  --family-id mfs_sugar \
+  --account project_xxx \
+  --submit
+```
+
+Generates a SLURM script to run InterProScan on the characterized FASTA. Results go to `families/<family_id>/characterized/interproscan/`.
+
+#### 3. Select matching proteins from project proteomes
+
+```bash
+fungalphylo protsetphylo select /path/to/project \
+  --family-id mfs_sugar \
+  --arch-mode flag
+```
+
+Selection logic:
+- Computes e-value thresholds from the characterized set (worst score per Pfam = threshold)
+- Scans project InterProScan results for proteins matching target Pfams within threshold
+- `--arch-mode strict`: exclude proteins with non-matching domain architectures
+- `--arch-mode flag` (default): include all, annotate match status in report
+- `--arch-mode off`: skip architecture check
+
+Outputs per-portal FASTAs and `selection_report.tsv` in `families/<family_id>/selected/`.
+
+#### 4. Build merged FASTA
+
+```bash
+fungalphylo protsetphylo build-fasta /path/to/project \
+  --family-id mfs_sugar
+```
+
+Merges characterized and selected proteins:
+- Characterized proteins with `portal_id` + `protein_id` replace their selected counterparts
+- Characterized without `portal_id` are included as standalone sequences
+- Optional `--redundancy-tool cdhit|mmseqs2 --identity-threshold 0.95`
+
+Outputs `families/<family_id>/fasta/combined.faa` plus per-portal FASTAs.
+
+#### 5. Align
+
+```bash
+fungalphylo protsetphylo align /path/to/project \
+  --family-id mfs_sugar \
+  --account project_xxx \
+  --submit
+```
+
+Generates a SLURM script that runs MAFFT (`--auto`) then trimAl (`-automated1`). Outputs in `families/<family_id>/alignment/`.
+
+#### 6. Build phylogenetic tree
+
+```bash
+fungalphylo protsetphylo tree /path/to/project \
+  --family-id mfs_sugar \
+  --tree-method iqtree \
+  --account project_xxx \
+  --submit
+
+# Or with FastTree
+fungalphylo protsetphylo tree /path/to/project \
+  --family-id mfs_sugar \
+  --tree-method fasttree \
+  --account project_xxx \
+  --submit
+```
+
+IQ-TREE defaults: `-m MFP -bb 1000 -nt AUTO`. Override with `--model` and `--bootstrap`. Output in `families/<family_id>/tree/`.
+
+### Family directory structure
+
+```
+families/<family_id>/
+  characterized/
+    characterized.tsv          # Original input (preserved)
+    characterized.faa          # Generated FASTA
+    interproscan/              # IPR results on characterized
+  config/
+    pfams.txt                  # Target Pfam accessions
+  selected/
+    <portal_id>.faa            # Selected proteins per portal
+    selection_report.tsv       # What was selected and why
+  fasta/
+    <portal_id>.faa            # Merged per-portal
+    combined.faa               # All sequences for alignment
+  alignment/
+    combined.aln               # MAFFT output
+    combined.trimmed.aln       # trimAl output
+  tree/
+    combined.treefile          # IQ-TREE or FastTree output
+  manifest.json
+```
+
+---
+
+## Taxonomy & QC Reports
+
+```bash
+# Fetch NCBI taxon IDs
 fungalphylo taxonomy fetch-ncbi /path/to/project
+
+# Export/edit/apply taxonomy mapping
 fungalphylo taxonomy export /path/to/project --approved-only --out review/portal_taxonomy.tsv
 fungalphylo taxonomy apply /path/to/project review/portal_taxonomy.tsv
+
+# Generate BUSCO QC report ordered by taxonomy
 fungalphylo busco ingest-results /path/to/project --run-id <run_id>
 fungalphylo taxonomy busco-mockup /path/to/project --summary-rank family
 ```
 
-Use `--approved-only` with `taxonomy export` to build a template for just the approved portals. Use `--dry-run` with `taxonomy apply` to validate the table without writing. Blank `ncbi_taxon_id` values clear an existing assignment by default.
+---
 
-After a BUSCO run finishes, import its `batch_summary.txt` into SQLite with `busco ingest-results`. `taxonomy busco-mockup` reads the latest BUSCO run by default and resolves BUSCO summaries from, in order: an explicit `--busco-tsv`, imported `busco_results` rows, the BUSCO batch summary under `runs/<run_id>/busco_results/<batch_root>/batch_summary.txt`, and finally the older single-TSV fallback. It writes an HTML taxonomy-ordered QC report under `runs/<run_id>/reports/`, supports `--summary-rank family|order`, and highlights low-quality taxa below `--low-quality-threshold` (default `85`).
+## Tool Configuration
 
-### 6) Request restore (can take hours/days)
+External tools are configured in `tools.yaml`:
 
-Restore is separate from download. By default, it requests restore for **all approved files** and emails when ready.
-
-```bash
-fungalphylo restore /path/to/project --send-mail
+```yaml
+busco:
+  bin_dir: "/path/to/busco/bin"  # optional
+  command: "busco"
+interproscan:
+  bin_dir: ""                     # optional, modules loaded in job
+  command: "cluster_interproscan"
+mafft:
+  command: "mafft"                # module loaded in job
+trimal:
+  command: "trimal"
+iqtree:
+  command: "iqtree2"              # module loaded in job
 ```
 
-This writes payloads + responses under:
-`restore_requests/<timestamp>/`
+On Puhti, most tools are available via `module load` (handled in generated SLURM scripts).
 
-**Payloads are chunked** to stay under the backend character limit (default 3500, hard limit 4094).
+---
 
-Restore restart behavior:
-- `--dry-run` writes the payloads without requiring a token or posting requests
-- normal runs always write payload JSON before any POST attempt
-- `--retries` and `--retry-backoff-seconds` retry transient `429`/`5xx`/timeout restore failures before the payload is marked failed
-- `--continue-on-error` logs per-payload failures to `logs/errors.jsonl` and continues posting the remaining payloads
-- reruns create a new `restore_requests/<timestamp>/` directory rather than mutating an old request batch
-- each restore batch is also indexed in SQLite `restore_requests` so `status` can show the latest request state without scanning directories
-- SQLite stores only the batch ledger; inspect `payload_*.json`, `responses.jsonl`, and `logs/errors.jsonl` for payload-level detail
-
-### 7) Download approved files into raw cache
+## Diagnostics
 
 ```bash
-fungalphylo download /path/to/project
+# Project status summary
+fungalphylo status /path/to/project
+
+# Inspect failures (batches, staging errors, error log)
+fungalphylo failures /path/to/project
+
+# Database queries
+fungalphylo db query /path/to/project "SELECT * FROM families"
 ```
 
-This:
-- posts chunked download payloads to `https://files-download.jgi.doe.gov/download_files/`
-- saves bundles + extracted files under `download_requests/<timestamp>/`
-- moves matched files into:
-  `raw/<portal_id>/<file_id>/<original_filename>`
-- writes unmatched or missing manifest rows to:
-  `download_requests/<timestamp>/bundles/unmatched_manifest.tsv`
+---
 
-Download restart behavior:
-- `--dry-run` writes payloads without requiring a token or downloading bundles
-- normal runs always write payload JSON before any POST attempt and finish with `summary.json`
-- `--skip-if-raw-present` skips approved files already present at the configured raw path and verifies md5 when source metadata provides one
-- `--overwrite-staged` disables the default skip for approved source file IDs already represented in any staging snapshot
-- `--retries` and `--retry-backoff-seconds` retry transient `429`/`5xx`/timeout download failures before the payload is marked failed
-- `--continue-on-error` logs per-payload failures to `logs/errors.jsonl` and continues with the remaining payloads
-- reruns create a new `download_requests/<timestamp>/` directory rather than mutating an old request batch
-- each download batch is also indexed in SQLite `download_requests` so `status` can show the latest batch outcome and counts quickly
-- malformed non-zip responses and extracted bundles with no manifest are treated as per-payload failures, logged to `logs/errors.jsonl`, and reflected in the batch ledger/status
-- SQLite stores only the batch ledger; inspect the request directory, manifests, `summary.json`, and `logs/errors.jsonl` for payload-level detail
+## Useful Flags
 
-### 8) Stage (normalize + map + manifest)
-
-Staging creates an immutable `staging_id` and normalized FASTA files with canonical headers:
-`{portal_id}|{jgi_protein_id}`
-
-```bash
-fungalphylo stage /path/to/project --dry-run
-fungalphylo stage /path/to/project
-```
-
-Current outputs:
-- `staging/<staging_id>/proteomes/<portal_id>.faa`
-- `staging/<staging_id>/cds/<portal_id>.fna`
-- `staging/<staging_id>/idmaps/generated/<portal_id>.protein_id_map.tsv`
-- `staging/<staging_id>/manifest.json`
-- `staging/<staging_id>/checksums.tsv`
-- `staging/<staging_id>/reports/*` (for non-JGI header cases)
-
-Staging is snapshot-first:
-- each successful run creates a new `staging_id`
-- downstream compute should target a chosen `staging_id`
-- equivalent artifacts are reused internally by cache key instead of being regenerated unnecessarily
-
-Stage restart behavior:
-- `--dry-run` validates inputs and reports the intended generate/reuse action without writing a snapshot
-- normal runs always create a fresh `staging_id`
-- `--overwrite` disables cache-key based artifact reuse across snapshots
-- failures are written to `staging/<staging_id>/reports/failed_portals.tsv` when `--continue-on-error` is active
-
-#### Non-JGI header portals
-Some portals have non-JGI FASTA headers (uniform within that proteome). These require an ID mapping file.
-
-Recommended universal per-portal mapping file (TSV):
-- `canonical_protein_id`
-- `model_id`
-- `original_header`
-- `transcript_id` (optional)
-
-Mapping lookup is **primary by exact original_header** (most reliable), with optional fallback via `model_id` if present.
+| Flag | Available on | Effect |
+|------|-------------|--------|
+| `--dry-run` | stage, restore, download | Validate without side effects |
+| `--continue-on-error` | stage, restore, download | Don't stop on first failure |
+| `--submit` | busco-slurm, interproscan-slurm, protsetphylo | Submit SLURM job after writing |
+| `--resume-run-id` | busco-slurm, interproscan-slurm | Resume a timed-out run |
+| `--staging-id` | most compute commands | Target a specific snapshot |
+| `--no-confirm` | SLURM commands | Skip account confirmation prompt |
 
 ---
 
 ## Logging
 
-- `logs/events.jsonl` — one-line JSON records for major actions
-- `logs/errors.jsonl` — structured error records for long batch steps (fetch/download)
+- `logs/events.jsonl` — structured records for all major actions
+- `logs/errors.jsonl` — error details for batch operations
 
 ---
 
-## Helpful flags
-
-- `--dry-run` on staging/download/restore to build payloads and validate inputs without executing.
-- `--continue-on-error` (where supported) to process large batches without stopping.
-- `fungalphylo failures /path/to/project` to inspect failed/partial batches, staging failures, and recent error log entries.
-
-For BUSCO on Puhti / SLURM:
+## Development
 
 ```bash
-fungalphylo busco-slurm /path/to/project --staging-id <staging_id>
+# Run all tests
+pytest
+
+# Run specific test file
+pytest tests/test_protsetphylo_init.py -v
+
+# Lint and format
+ruff check .
+ruff format .
+
+# Quick compile check
+python -m compileall src
 ```
 
-If `--staging-id` is omitted, the latest staging snapshot is used.
-
-Use `--submit` only on systems that actually have `sbatch` access. In local development, the intended workflow is to write the SLURM script, review it, and submit it later on Puhti.
-
-Each BUSCO script generation also writes `runs/<run_id>/manifest.json` and records a `runs` row in SQLite.
-
-Batch-mode BUSCO output is expected under:
-
-```text
-runs/<run_id>/busco_results/busco_<staging_id>_<run_id>/
-  batch_summary.txt
-  <portal_id>.faa/
-  ...
-```
-
-If a BUSCO run times out or fails, resume the existing run with updated SLURM parameters:
-
-```bash
-fungalphylo busco-slurm /path/to/project --resume-run-id <run_id> --time 48:00:00 --submit
-```
-
-This loads the existing manifest, regenerates the script with the new time limit, and resubmits. The generated script skips execution if `batch_summary.txt` already exists (i.e. the run previously completed).
-
-`busco-slurm` does not import results automatically. After you verify that the BUSCO run completed successfully on Puhti, import the batch summary manually:
-
-```bash
-fungalphylo busco ingest-results /path/to/project --run-id <run_id>
-```
-
-This stores one summary row per portal in SQLite `busco_results` while keeping the detailed BUSCO outputs on disk under `runs/<run_id>/busco_results/`.
-
-For InterProScan on Puhti / SLURM:
-
-```bash
-fungalphylo interproscan-slurm /path/to/project --staging-id <staging_id> --application pfam
-```
-
-Repeat `--application` to request multiple InterProScan databases. The default application is `PfamA`. For the current Puhti `cluster_interproscan` wrapper path, `--format` is restricted to a single `TSV` output because the wrapper expects one explicit `-o` output file and one `-f` format.
-
-The command writes a launcher script, a worker sbatch script, a controller script, a per-proteome queue ledger, and a run manifest under `runs/<run_id>/`. The launcher now runs a submit-and-poll controller that submits one worker job at a time with `sbatch --parsable`, records the returned child job ID in `queue.tsv`, polls that exact job via `squeue`/`sacct`, and only then advances to the next proteome. This avoids exhausting concurrent-job limits on Puhti when `cluster_interproscan` submits cluster work internally.
-
-The generated worker job loads the Puhti modules `biokit` and `interproscan` before running `cluster_interproscan`. `interproscan.bin_dir` is optional and only prepended to `PATH` if you explicitly configure it.
-
-If an InterProScan launcher run times out after some proteomes have already completed, resume the existing run from the CLI without rewriting its queue ledger:
-
-```bash
-fungalphylo interproscan-slurm /path/to/project --resume-run-id <run_id> --submit
-```
-
-This refreshes the launcher/controller scripts for that existing run, preserves the current `queue.tsv` statuses, and re-submits the launcher. The generated launcher now uses the same Python interpreter that wrote the run, so it does not depend on a bare `python3` having the right package environment.
-
-If you prefer to resubmit the already-generated launcher directly, this still works:
-
-```bash
-sbatch /path/to/project/runs/<run_id>/slurm/interproscan_launcher.sbatch
-```
-
-Both resume paths reuse the existing `queue.tsv` ledger and skip rows already marked `completed`. Do not rerun `fungalphylo interproscan-slurm --run-id <run_id>` for resume, because that command creates a fresh run scaffold and rewrites `queue.tsv`.
-
-Use `--limit N` to include only the first `N` staged proteomes in the queue for debugging.
-
-Use `--submit` only on systems that actually have `sbatch` access. In local development, the intended workflow is to write the scripts, review them, and submit them later on Puhti.
+Line length: 100 characters. See `pyproject.toml` for full config.
 
 ---
 
-## Next planned steps (compute)
+## Design Principles
 
-Once staging is stable, compute steps (OrthoFinder, InterProScan, species tree, family runs) will be added as Snakemake-backed runs in `runs/<run_id>/` with caching and STARTED/DONE markers.
+- **Immutable snapshots**: staging and runs never mutate prior directories
+- **Batch ledger boundary**: SQLite tracks batches; per-item detail lives in files
+- **Artifact reuse**: equivalent artifacts shared across snapshots by cache key
+- **Restart contract**: every command has documented rerun/skip/completion semantics (see `agent_context/restart_contract.md`)
+- **Write-first**: SLURM scripts are generated locally, submitted only with `--submit`
 
 ---
 

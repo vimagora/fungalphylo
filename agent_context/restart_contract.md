@@ -236,6 +236,9 @@ Rerun contract:
 - `--limit` intentionally changes the queued proteome set for debug-sized runs
 - for the current Puhti `cluster_interproscan` wrapper path, the generated worker uses one explicit `-o` output file and therefore supports only a single `TSV` format
 - `--resume-run-id <run_id>` is the in-place continuation path for an existing InterProScan run; it refreshes the launcher/controller/worker scripts for that run, preserves the existing `queue.tsv` ledger, and can optionally re-submit the launcher
+- on resume, after all primary jobs complete, the controller automatically scans completed rows for `.failed_sequences` files (produced by `cluster_interproscan` when some subjobs fail)
+- for each `.failed_sequences` file found: rotates it to `.failed_sequences.N` for traceability, re-runs InterProScan on those sequences, and appends the results to the main `<portal_id>.tsv`
+- if the retry itself produces new `.failed_sequences`, they are left in place for a subsequent resume to pick up
 - do not use `--run-id <existing_run_id>` as a resume path; that mode creates fresh scaffolding and rewrites `queue.tsv`
 
 Operator guidance:
@@ -243,6 +246,106 @@ Operator guidance:
 - on Puhti, the worker script loads `biokit` and `interproscan` modules before running `cluster_interproscan`
 - the generated launcher now invokes the controller with the same Python interpreter that wrote the run, avoiding dependence on a bare `python3` environment
 - local development should still treat this as a write-first command unless explicit `--submit` behavior is being tested on CSC
+
+## `protsetphylo init`
+
+Same work:
+- a family ID, characterized TSV, and set of Pfam accessions
+
+Completion proof:
+- `families/<family_id>/` directory with `characterized/`, `config/`, `manifest.json`
+- `families` row in SQLite
+
+Skip behavior:
+- rejects if family directory already exists (no implicit overwrite)
+
+Rerun contract:
+- to re-initialize, delete the family directory and its SQLite row first
+- each family ID is unique; the command will not overwrite an existing family
+
+## `protsetphylo interproscan`
+
+Same work:
+- a family ID and its characterized FASTA
+
+Completion proof:
+- generated SLURM script under `runs/<run_id>/slurm/`
+- `runs/<run_id>/manifest.json`
+- `runs` row in SQLite
+- `families.ipr_run_id` updated
+
+Skip behavior:
+- none; rerunning creates a new run
+
+Rerun contract:
+- always safe to rerun; creates a new run scaffold each time
+- use `--run-id` to control the run identifier
+
+## `protsetphylo select`
+
+Same work:
+- a family ID, project InterProScan run, staging snapshot, and arch-mode
+
+Completion proof:
+- per-portal FASTAs in `families/<family_id>/selected/`
+- `selection_report.tsv`
+- updated `manifest.json`
+
+Skip behavior:
+- none; rerunning overwrites the selected directory contents
+
+Rerun contract:
+- always safe to rerun with different parameters (arch-mode, staging, IPR run)
+- overwrites `selected/` contents in place
+
+## `protsetphylo build-fasta`
+
+Same work:
+- a family ID plus its characterized and selected FASTAs
+
+Completion proof:
+- `families/<family_id>/fasta/combined.faa`
+- per-portal FASTAs in `fasta/`
+- updated `manifest.json`
+
+Skip behavior:
+- none; rerunning overwrites the fasta directory contents
+
+Rerun contract:
+- always safe to rerun; regenerates all FASTAs from current characterized + selected state
+
+## `protsetphylo align`
+
+Same work:
+- a family ID and its `combined.faa`
+
+Completion proof:
+- generated SLURM script under `runs/<run_id>/slurm/`
+- `runs/<run_id>/manifest.json`
+- `runs` row in SQLite
+
+Skip behavior:
+- none; rerunning creates a new run
+
+Rerun contract:
+- always safe to rerun; creates a new run scaffold each time
+
+## `protsetphylo tree`
+
+Same work:
+- a family ID, its trimmed alignment, and tree method/parameters
+
+Completion proof:
+- generated SLURM script under `runs/<run_id>/slurm/`
+- `runs/<run_id>/manifest.json`
+- `runs` row in SQLite
+
+Skip behavior:
+- none; rerunning creates a new run
+
+Rerun contract:
+- always safe to rerun with different parameters (method, model, bootstrap)
+- creates a new run scaffold each time
 
 ## Status Interpretation
 

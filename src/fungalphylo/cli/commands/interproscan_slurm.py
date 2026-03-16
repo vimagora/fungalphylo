@@ -460,6 +460,91 @@ def submit_row(row: dict[str, str]) -> str:
     return job_id
 
 
+def retry_failed_sequences() -> int:
+    \"\"\"Scan completed rows for .failed_sequences files and retry them.\"\"\"
+    rows = read_queue()
+    retries = []
+    for row in rows:
+        if row["status"].strip().lower() != "completed":
+            continue
+        tsv_path = Path(row["tsv_path"])
+        failed_path = Path(f"{{tsv_path}}.failed_sequences")
+        if not failed_path.exists():
+            continue
+        retries.append(row)
+
+    if not retries:
+        print("No failed sequences to retry.", flush=True)
+        return 0
+
+    print(f"Retrying failed sequences for {{len(retries)}} proteome(s).", flush=True)
+    had_errors = False
+
+    for row in retries:
+        portal_id = row["portal_id"]
+        tsv_path = Path(row["tsv_path"])
+        failed_path = Path(f"{{tsv_path}}.failed_sequences")
+
+        # Rotate to numbered backup for traceability
+        n = 1
+        while Path(f"{{tsv_path}}.failed_sequences.{{n}}").exists():
+            n += 1
+        rotated = Path(f"{{tsv_path}}.failed_sequences.{{n}}")
+        failed_path.rename(rotated)
+        print(f"Rotated {{failed_path.name}} -> {{rotated.name}}", flush=True)
+
+        # Submit worker with failed sequences as input, temp output
+        retry_output = Path(f"{{tsv_path}}.retry_{{n}}")
+        retry_row = dict(row)
+        retry_row["input_fasta"] = str(rotated)
+        retry_row["tsv_path"] = str(retry_output)
+
+        update_row(portal_id, status="retrying", note=f"retry {{n}}", submitted_job_id="")
+        job_id = submit_row(retry_row)
+        update_row(portal_id, status="retrying", note=f"retry {{n}} job {{job_id}}", submitted_job_id=job_id)
+        print(f"Submitted retry {{n}} for {{portal_id}} as job {{job_id}}", flush=True)
+
+        state = wait_for_terminal_state(job_id)
+
+        if state == "COMPLETED" and retry_output.exists():
+            # Append retry results to main TSV
+            with open(tsv_path, "a") as main_f, open(retry_output, "r") as retry_f:
+                content = retry_f.read()
+                if content:
+                    main_f.write(content)
+            retry_output.unlink()
+
+            # Check if cluster_interproscan produced new failed sequences
+            new_failed = Path(f"{{retry_output}}.failed_sequences")
+            if new_failed.exists():
+                new_failed.rename(failed_path)
+                update_row(portal_id, status="completed",
+                           note=f"retry {{n}} done; some sequences still failed",
+                           submitted_job_id=job_id)
+                print(f"Retry {{n}} for {{portal_id}}: recovered some sequences, "
+                      f"but new failed sequences remain.", flush=True)
+            else:
+                update_row(portal_id, status="completed",
+                           note=f"retry {{n}} done; all sequences recovered",
+                           submitted_job_id=job_id)
+                print(f"Retry {{n}} for {{portal_id}}: all failed sequences recovered.",
+                      flush=True)
+        else:
+            note = f"retry {{n}} job {{job_id}} state={{state}}"
+            if state == "COMPLETED" and not retry_output.exists():
+                note += "; missing output"
+            # Restore failed_sequences so a future resume can retry again
+            if not failed_path.exists():
+                rotated.rename(failed_path)
+            update_row(portal_id, status="completed", note=note, submitted_job_id=job_id)
+            print(f"Retry {{n}} for {{portal_id}} failed: {{note}}", file=sys.stderr,
+                  flush=True)
+            had_errors = True
+            # Continue with other retries — don't abort
+
+    return 1 if had_errors else 0
+
+
 def main() -> int:
     for row in read_queue():
         status = row["status"].strip().lower()
@@ -492,7 +577,8 @@ def main() -> int:
         print(f"Failed {{row['portal_id']}}: {{note}}", file=sys.stderr, flush=True)
         return 1
 
-    return 0
+    # After all primary jobs complete, retry any failed sequences
+    return retry_failed_sequences()
 
 
 if __name__ == "__main__":

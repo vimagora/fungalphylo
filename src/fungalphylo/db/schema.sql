@@ -158,3 +158,16 @@ CREATE TABLE IF NOT EXISTS download_requests (
 
 CREATE INDEX IF NOT EXISTS idx_download_requests_created_at
   ON download_requests(created_at DESC);
+
+-- Gene families for protsetphylo sub-pipeline
+CREATE TABLE IF NOT EXISTS families (
+    family_id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    pfams TEXT NOT NULL,
+    characterized_tsv TEXT,
+    characterized_fasta TEXT,
+    ipr_run_id TEXT,
+    project_ipr_run_id TEXT,
+    manifest_path TEXT,
+    manifest_sha256 TEXT
+);
