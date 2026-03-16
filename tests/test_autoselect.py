@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -12,12 +12,11 @@ from fungalphylo.cli.main import app
 from fungalphylo.core.paths import ProjectPaths
 from fungalphylo.db.db import connect
 
-
 runner = CliRunner()
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _init_project(project_dir: Path) -> ProjectPaths:
@@ -100,7 +99,7 @@ def test_score_candidate_respects_explicit_weights() -> None:
         jat_label="proteins_filtered",
         file_format="fasta",
         data_group="genome",
-        modified_date=datetime.now(timezone.utc),
+        modified_date=datetime.now(UTC),
         file_date=None,
         file_status="RESTORED",
     )

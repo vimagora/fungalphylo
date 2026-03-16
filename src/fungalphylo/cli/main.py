@@ -2,24 +2,22 @@ from __future__ import annotations
 
 import typer
 
-from fungalphylo.cli.commands import init as init_cmd
-from fungalphylo.cli.commands import ingest as ingest_cmd
-from fungalphylo.cli.commands import fetch_index as fetch_index_cmd
 from fungalphylo.cli.commands import autoselect as autoselect_cmd
-from fungalphylo.cli.commands import review as review_cmd
-from fungalphylo.cli.commands import restore as restore_cmd
-from fungalphylo.cli.commands import download as download_cmd
-from fungalphylo.cli.commands import stage as stage_cmd
 from fungalphylo.cli.commands import busco as busco_cmd
 from fungalphylo.cli.commands import busco_slurm as busco_slurm_cmd
+from fungalphylo.cli.commands import db as db_cmd
+from fungalphylo.cli.commands import download as download_cmd
+from fungalphylo.cli.commands import fetch_index as fetch_index_cmd
+from fungalphylo.cli.commands import idmap as idmap_cmd
+from fungalphylo.cli.commands import ingest as ingest_cmd
+from fungalphylo.cli.commands import init as init_cmd
 from fungalphylo.cli.commands import interproscan_slurm as interproscan_slurm_cmd
 from fungalphylo.cli.commands import protsetphylo as protsetphylo_cmd
-
-from fungalphylo.cli.commands import idmap as idmap_cmd
-from fungalphylo.cli.commands import db as db_cmd
+from fungalphylo.cli.commands import restore as restore_cmd
+from fungalphylo.cli.commands import review as review_cmd
+from fungalphylo.cli.commands import stage as stage_cmd
 from fungalphylo.cli.commands import status as status_cmd
 from fungalphylo.cli.commands import taxonomy as taxonomy_cmd
-
 
 app = typer.Typer(
     name="fungalphylo",

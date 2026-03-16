@@ -1,358 +1,60 @@
 from __future__ import annotations
 
 import csv
-import json
-import os
-import re
-import shutil
-from collections import defaultdict
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
 
 import typer
 from rich.progress import (
-    Progress,
     BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    TextColumn,
     TimeElapsedColumn,
     TimeRemainingColumn,
-    TextColumn,
-    MofNCompleteColumn,
 )
 
 from fungalphylo.core.config import load_yaml, resolve_config
 from fungalphylo.core.errors import exception_record, log_error_jsonl
 from fungalphylo.core.events import log_event
-from fungalphylo.core.fasta import FastaRecord, iter_fasta, write_fasta
-from fungalphylo.core.hash import hash_json, sha256_file, write_checksums_tsv
-from fungalphylo.core.ids import new_staging_id
-from fungalphylo.core.idmap import PortalIdMap, load_id_map, resolve_id_map_file
+from fungalphylo.core.hash import sha256_file
+from fungalphylo.core.idmap import load_id_map, resolve_id_map_file
+from fungalphylo.core.ids import new_staging_id, now_iso
 from fungalphylo.core.manifest import write_manifest
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.core.resolve import resolve_raw_path
-from fungalphylo.core.validate import validate_fasta_headers_are_canonical
+from fungalphylo.core.stage import (
+    artifact_cache_key,
+    detect_header_mode,
+    find_reusable_artifact,
+    insert_staging_file,
+    link_or_copy,
+    load_token_to_canon_map,
+    resolve_default_idmap,
+    stage_cds_jgi,
+    stage_cds_non_jgi,
+    stage_proteome_jgi,
+    stage_proteome_non_jgi,
+    write_sample_headers,
+    write_snapshot_checksums,
+)
 from fungalphylo.db.db import connect, init_db
 from fungalphylo.db.queries import fetch_approvals_with_files
 
 app = typer.Typer(help="Stage approved proteomes/CDS into immutable staging snapshots.")
 
 PORTAL_WIDTH = 18
-JGI_PIPE_RE = re.compile(r"^jgi\|([^|]+)\|(\d+)\|([^|\s]+)")
-NA_TOKENS = {"", "na", "n/a", "#n/d", "#na", "null", "none", "nan"}
-
-def is_na_value(v: str | None) -> bool:
-    if v is None:
-        return True
-    return v.strip().lower() in NA_TOKENS
-
-
-def strip_trailing_stop_aa(seq: str) -> str:
-    # remove trailing stop(s) only
-    return seq.rstrip("*")
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def resolve_default_idmap(project_dir: Path, cfg: dict, explicit: Optional[Path]) -> Optional[Path]:
-    if explicit is not None:
-        return explicit.expanduser().resolve()
-    default_rel = cfg.get("staging", {}).get("default_idmaps_dir", "idmaps")
-    candidate = (project_dir / default_rel).expanduser().resolve()
-    return candidate if candidate.exists() else None
-
-
-def parse_jgi_pipe_header(header: str) -> tuple[str, str, str]:
-    first = header.split()[0]
-    m = JGI_PIPE_RE.match(first)
-    if not m:
-        raise ValueError(f"Not a JGI pipe header: {header!r}")
-    return m.group(1), m.group(2), m.group(3)
-
-
-def extract_model_token(header: str) -> str:
-    h = header.strip()
-    return re.split(r"[\s|]+", h, maxsplit=1)[0]
-
-
-def detect_header_mode(fasta_path: Path, probe_n: int = 25) -> str:
-    n = 0
-    jgi_hits = 0
-    for rec in iter_fasta(fasta_path):
-        n += 1
-        try:
-            parse_jgi_pipe_header(rec.header)
-            jgi_hits += 1
-        except ValueError:
-            pass
-        if n >= probe_n:
-            break
-    if n == 0:
-        raise ValueError(f"Empty FASTA: {fasta_path}")
-    return "jgi_pipe" if jgi_hits == n else "non_jgi"
-
-
-def write_sample_headers(path: Path, out_txt: Path, n: int = 20) -> None:
-    out_txt.parent.mkdir(parents=True, exist_ok=True)
-    lines: list[str] = []
-    for i, rec in enumerate(iter_fasta(path)):
-        lines.append(">" + rec.header)
-        if i + 1 >= n:
-            break
-    out_txt.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
-
-
-def _lookup_non_jgi_canon(rec_header: str, idmap: PortalIdMap) -> tuple[Optional[str], Optional[str]]:
-    if rec_header in idmap.header_to_canon:
-        return idmap.header_to_canon[rec_header], None
-    token = extract_model_token(rec_header)
-    if token in idmap.model_to_canon:
-        return idmap.model_to_canon[token], token
-    return None, token
-
-
-def stage_proteome_jgi(
-    *,
-    in_path: Path,
-    out_path: Path,
-    portal_id: str,
-    min_len: int,
-    max_len: int,
-    map_writer: csv.writer,
-) -> tuple[dict, dict]:
-    stats = defaultdict(int)
-    model_to_canon: dict[str, str] = {}
-    out_records: list[FastaRecord] = []
-
-    for rec in iter_fasta(in_path):
-        stats["records_total"] += 1
-        p_in, protein_num, model_id = parse_jgi_pipe_header(rec.header)
-        if p_in != portal_id:
-            stats["portal_mismatch"] += 1
-
-        seq = strip_trailing_stop_aa(rec.sequence)
-        L = len(seq)
-        if L < min_len:
-            stats["dropped_too_short"] += 1
-            continue
-        if L > max_len:
-            stats["dropped_too_long"] += 1
-            continue
-
-        canon = f"{portal_id}|{protein_num}"
-        model_to_canon[model_id] = canon
-        map_writer.writerow([canon, rec.header, L, model_id])
-        out_records.append(FastaRecord(header=canon, sequence=seq))
-        stats["kept"] += 1
-
-    write_fasta(out_records, out_path)
-    validate_fasta_headers_are_canonical(out_path)
-    return dict(stats), model_to_canon
-
-
-def stage_cds_jgi(
-    *,
-    in_path: Path,
-    out_path: Path,
-    portal_id: str,
-    model_to_canon: dict[str, str],
-) -> dict:
-    stats = defaultdict(int)
-    out_records: list[FastaRecord] = []
-
-    for rec in iter_fasta(in_path):
-        stats["records_total"] += 1
-        try:
-            p_in, _tx_num, model_id = parse_jgi_pipe_header(rec.header)
-        except ValueError:
-            stats["dropped_non_jgi_header"] += 1
-            continue
-
-        if p_in != portal_id:
-            stats["portal_mismatch"] += 1
-
-        canon = model_to_canon.get(model_id)
-        if canon is None:
-            stats["dropped_no_protein_match"] += 1
-            continue
-
-        out_records.append(FastaRecord(header=canon, sequence=rec.sequence))
-        stats["kept"] += 1
-
-    write_fasta(out_records, out_path)
-    validate_fasta_headers_are_canonical(out_path)
-    return dict(stats)
-
-
-def stage_proteome_non_jgi(
-    *,
-    in_path: Path,
-    out_path: Path,
-    portal_id: str,
-    min_len: int,
-    max_len: int,
-    idmap: PortalIdMap,
-    map_writer: csv.writer,
-) -> tuple[dict, dict]:
-    stats = defaultdict(int)
-    token_to_canon: dict[str, str] = {}
-    out_records: list[FastaRecord] = []
-
-    for rec in iter_fasta(in_path):
-        stats["records_total"] += 1
-        canon, token = _lookup_non_jgi_canon(rec.header, idmap)
-        if canon is None:
-            stats["dropped_missing_in_idmap"] += 1
-            continue
-
-        if is_na_value(canon):
-            stats["dropped_na_mapping"] += 1
-            continue
-
-        seq = strip_trailing_stop_aa(rec.sequence)
-        L = len(seq)
-        if L < min_len:
-            stats["dropped_too_short"] += 1
-            continue
-        if L > max_len:
-            stats["dropped_too_long"] += 1
-            continue
-
-        map_writer.writerow([canon, rec.header, L, token or ""])
-        out_records.append(FastaRecord(header=canon, sequence=seq))
-        stats["kept"] += 1
-        if token:
-            token_to_canon[token] = canon
-
-    write_fasta(out_records, out_path)
-    validate_fasta_headers_are_canonical(out_path)
-    return dict(stats), token_to_canon
-
-
-def stage_cds_non_jgi(
-    *,
-    in_path: Path,
-    out_path: Path,
-    token_to_canon: dict[str, str],
-    idmap_cds: Optional[PortalIdMap],
-) -> dict:
-    stats = defaultdict(int)
-    out_records: list[FastaRecord] = []
-
-    for rec in iter_fasta(in_path):
-        stats["records_total"] += 1
-        canon: Optional[str] = None
-        if idmap_cds and rec.header in idmap_cds.header_to_canon:
-            canon = idmap_cds.header_to_canon[rec.header]
-        else:
-            token = extract_model_token(rec.header)
-            canon = token_to_canon.get(token)
-
-        if canon is None or is_na_value(canon):
-            stats["dropped_no_protein_match"] += 1
-            continue
-
-        out_records.append(FastaRecord(header=canon, sequence=rec.sequence))
-        stats["kept"] += 1
-
-    write_fasta(out_records, out_path)
-    validate_fasta_headers_are_canonical(out_path)
-    return dict(stats)
-
-
-def load_token_to_canon_map(map_path: Path) -> dict[str, str]:
-    token_to_canon: dict[str, str] = {}
-    with map_path.open("r", encoding="utf-8", newline="") as mf:
-        reader = csv.DictReader(mf, delimiter="\t")
-        for row in reader:
-            token = (row.get("model_id_or_token") or "").strip()
-            canon = (row.get("canonical_protein_id") or "").strip()
-            if token and canon:
-                token_to_canon[token] = canon
-    return token_to_canon
-
-
-def artifact_cache_key(payload: dict) -> str:
-    return hash_json(payload)
-
-
-def link_or_copy(src: Path, dst: Path) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    if dst.exists():
-        dst.unlink()
-    try:
-        os.link(src, dst)
-    except OSError:
-        shutil.copy2(src, dst)
-
-
-def find_reusable_artifact(conn, *, kind: str, cache_key: str):
-    row = conn.execute(
-        """
-        SELECT staging_id, artifact_path, artifact_sha256, source_file_id
-        FROM staging_files
-        WHERE kind=? AND artifact_cache_key=?
-        ORDER BY created_at DESC
-        LIMIT 1
-        """,
-        (kind, cache_key),
-    ).fetchone()
-    return row
-
-
-def insert_staging_file(
-    rows: list[dict],
-    *,
-    staging_id: str,
-    portal_id: str,
-    kind: str,
-    source_file_id: str,
-    raw_sha256: str,
-    artifact_path: str,
-    artifact_sha256: str,
-    artifact_cache_key: str,
-    reused_from_staging_id: Optional[str],
-    params: dict,
-) -> None:
-    rows.append(
-        {
-            "staging_id": staging_id,
-            "portal_id": portal_id,
-            "kind": kind,
-            "source_file_id": source_file_id,
-            "raw_sha256": raw_sha256,
-            "artifact_path": artifact_path,
-            "artifact_sha256": artifact_sha256,
-            "artifact_cache_key": artifact_cache_key,
-            "reused_from_staging_id": reused_from_staging_id,
-            "created_at": _now_iso(),
-            "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
-        }
-    )
-
-
-def write_snapshot_checksums(snapshot_dir: Path, project_dir: Path, out_path: Path) -> None:
-    rows: list[tuple[str, str]] = []
-    for path in sorted(snapshot_dir.rglob("*")):
-        if not path.is_file():
-            continue
-        if path == out_path:
-            continue
-        rows.append((str(path.relative_to(project_dir)), sha256_file(path)))
-    write_checksums_tsv(rows, out_path)
 
 
 @app.callback(invoke_without_command=True)
 def stage_command(
     ctx: typer.Context,
     project_dir: Path = typer.Argument(None, help="Project directory"),
-    portal_id: Optional[List[str]] = typer.Option(None, "--portal-id", help="Stage only specific portal IDs."),
-    min_aa: Optional[int] = typer.Option(None, "--min-aa", help="Override staging.min_aa."),
-    max_aa: Optional[int] = typer.Option(None, "--max-aa", help="Override staging.max_aa."),
+    portal_id: list[str] | None = typer.Option(None, "--portal-id", help="Stage only specific portal IDs."),
+    min_aa: int | None = typer.Option(None, "--min-aa", help="Override staging.min_aa."),
+    max_aa: int | None = typer.Option(None, "--max-aa", help="Override staging.max_aa."),
     probe_n: int = typer.Option(25, "--probe-n", help="Headers to probe when detecting JGI header mode."),
-    id_map: Optional[Path] = typer.Option(None, "--id-map", help="Mapping for non-JGI portals (dir or TSV)."),
-    id_map_cds: Optional[Path] = typer.Option(None, "--id-map-cds", help="Optional CDS mapping for non-JGI portals."),
+    id_map: Path | None = typer.Option(None, "--id-map", help="Mapping for non-JGI portals (dir or TSV)."),
+    id_map_cds: Path | None = typer.Option(None, "--id-map-cds", help="Optional CDS mapping for non-JGI portals."),
     overwrite: bool = typer.Option(False, "--overwrite", help="Force regeneration instead of reusing equivalent artifacts."),
     continue_on_error: bool = typer.Option(True, "--continue-on-error/--fail-fast", help="Continue after portal errors."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preflight only (no writes)."),
@@ -402,8 +104,8 @@ def stage_command(
             for path in (snapshot_dir, proteomes_dir, cds_dir, reports_dir, generated_idmaps_dir):
                 path.mkdir(parents=True, exist_ok=True)
 
-        actions: List[dict] = []
-        failures: List[dict] = []
+        actions: list[dict] = []
+        failures: list[dict] = []
         staging_rows: list[dict] = []
 
         with Progress(
@@ -438,8 +140,8 @@ def stage_command(
                     prot_mode = detect_header_mode(raw_prot, probe_n=probe_n)
                     prot_raw_sha256 = sha256_file(raw_prot)
 
-                    prot_idmap_path: Optional[Path] = None
-                    prot_idmap_sha256: Optional[str] = None
+                    prot_idmap_path: Path | None = None
+                    prot_idmap_sha256: str | None = None
                     if prot_mode != "jgi_pipe":
                         if resolved_id_map is None:
                             if dry_run:
@@ -567,9 +269,9 @@ def stage_command(
                             raise FileNotFoundError(f"Missing raw CDS/transcript: {raw_cds}")
 
                         cds_raw_sha256 = sha256_file(raw_cds)
-                        cds_idmap_path: Optional[Path] = None
-                        cds_idmap_sha256: Optional[str] = None
-                        cds_map_obj: Optional[PortalIdMap] = None
+                        cds_idmap_path: Path | None = None
+                        cds_idmap_sha256: str | None = None
+                        cds_map_obj = None
 
                         if prot_mode != "jgi_pipe" and resolved_id_map_cds is not None:
                             try:
@@ -669,7 +371,7 @@ def stage_command(
             log_event(
                 project_dir,
                 {
-                    "ts": _now_iso(),
+                    "ts": now_iso(),
                     "event": "stage",
                     "staging_id": staging_id,
                     "dry_run": True,
@@ -682,7 +384,7 @@ def stage_command(
 
         manifest = {
             "staging_id": staging_id,
-            "created_at": _now_iso(),
+            "created_at": now_iso(),
             "thresholds": {"min_aa": min_len, "max_aa": max_len},
             "raw_layout": raw_layout,
             "probe_n": probe_n,
@@ -709,7 +411,7 @@ def stage_command(
                 INSERT INTO stagings(staging_id, created_at, manifest_path, manifest_sha256)
                 VALUES(?,?,?,?)
                 """,
-                (staging_id, _now_iso(), manifest_rel, manifest_sha256),
+                (staging_id, now_iso(), manifest_rel, manifest_sha256),
             )
             for row in staging_rows:
                 conn.execute(
@@ -739,7 +441,7 @@ def stage_command(
 
         log_event(
             project_dir,
-            {"ts": _now_iso(), "event": "stage", "staging_id": staging_id, "n_actions": len(actions), "n_failures": len(failures)},
+            {"ts": now_iso(), "event": "stage", "staging_id": staging_id, "n_actions": len(actions), "n_failures": len(failures)},
         )
 
         typer.echo(f"Stage run recorded: {staging_id}")

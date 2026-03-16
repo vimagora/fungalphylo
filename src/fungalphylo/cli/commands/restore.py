@@ -4,24 +4,24 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-from rich.progress import (
-    Progress,
-    BarColumn,
-    TimeRemainingColumn,
-    TextColumn,
-    MofNCompleteColumn,
-)
+from typing import Any
 
 import requests
 import typer
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    TextColumn,
+    TimeRemainingColumn,
+)
 
+from fungalphylo.core.errors import exception_record, log_error_jsonl
 from fungalphylo.core.events import log_event
+from fungalphylo.core.ids import now_iso, now_tag
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.db.db import connect, init_db
-from fungalphylo.core.errors import log_error_jsonl, exception_record
 
 app = typer.Typer(help="Request that approved JGI files be restored from archive to disk in immutable batch directories.")
 
@@ -29,15 +29,7 @@ RESTORE_URL = "https://files.jgi.doe.gov/request_archived_files/"
 TRANSIENT_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _now_tag() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-
-def get_token(explicit: Optional[str]) -> str:
+def get_token(explicit: str | None) -> str:
     if explicit:
         tok = explicit.strip()
     env = os.getenv("JGI_TOKEN", "").strip()
@@ -65,12 +57,12 @@ def payload_stats(payload: dict) -> dict:
 @dataclass
 class DatasetRestoreBlock:
     dataset_id: str
-    file_ids: List[str]
+    file_ids: list[str]
     top_hit: str
-    mycocosm_portal_id: Optional[str] = None
+    mycocosm_portal_id: str | None = None
 
-    def as_payload_entry(self) -> Dict[str, Any]:
-        d: Dict[str, Any] = {
+    def as_payload_entry(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
             "file_ids": self.file_ids,
             "top_hit": self.top_hit,
         }
@@ -79,13 +71,13 @@ class DatasetRestoreBlock:
         return d
 
 
-def build_dataset_blocks(rows: List[dict]) -> List[DatasetRestoreBlock]:
+def build_dataset_blocks(rows: list[dict]) -> list[DatasetRestoreBlock]:
     """
     Input rows contain: portal_id, dataset_id, top_hit_id, proteome_file_id, cds_file_id
     We group by dataset_id. Each dataset block can include multiple portals' file_ids,
     but for MycoCosm portals it’s also fine if one dataset_id corresponds to one portal.
     """
-    by_dataset: Dict[str, DatasetRestoreBlock] = {}
+    by_dataset: dict[str, DatasetRestoreBlock] = {}
 
     for r in rows:
         portal_id = r["portal_id"]
@@ -121,19 +113,19 @@ def build_dataset_blocks(rows: List[dict]) -> List[DatasetRestoreBlock]:
 
 
 def chunk_restore_payloads(
-    blocks: List[DatasetRestoreBlock],
+    blocks: list[DatasetRestoreBlock],
     *,
     send_mail: bool,
     api_version: str = "2",
     max_chars: int = 3500,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     Create a list of payload dicts, each compact JSON length <= max_chars.
     Splits at dataset block boundaries (never splits file_ids inside a dataset).
     """
-    payloads: List[Dict[str, Any]] = []
+    payloads: list[dict[str, Any]] = []
 
-    def new_payload() -> Dict[str, Any]:
+    def new_payload() -> dict[str, Any]:
         return {"ids": {}, "send_mail": send_mail, "api_version": api_version}
 
     current = new_payload()
@@ -169,7 +161,7 @@ def chunk_restore_payloads(
     return payloads
 
 
-def post_restore(payload: Dict[str, Any], token: str, timeout: int = 120) -> Dict[str, Any]:
+def post_restore(payload: dict[str, Any], token: str, timeout: int = 120) -> dict[str, Any]:
     headers = {
         "accept": "application/json",
         "Authorization": f"{token}",
@@ -192,14 +184,14 @@ def is_transient_restore_error(exc: BaseException) -> bool:
 
 
 def post_restore_with_retries(
-    payload: Dict[str, Any],
+    payload: dict[str, Any],
     *,
     token: str,
     timeout: int,
     retries: int,
     retry_backoff_seconds: float,
     log_retry,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     max_attempts = max(1, retries + 1)
     attempt = 0
     while True:
@@ -218,8 +210,8 @@ def post_restore_with_retries(
 def restore_command(
     ctx: typer.Context,
     project_dir: Path = typer.Argument(None, help="Project directory"),
-    token: Optional[str] = typer.Option(None, "--token", help="JGI token (else uses env JGI_TOKEN)."),
-    portal_id: Optional[List[str]] = typer.Option(None, "--portal-id", help="Limit to specific portal IDs."),
+    token: str | None = typer.Option(None, "--token", help="JGI token (else uses env JGI_TOKEN)."),
+    portal_id: list[str] | None = typer.Option(None, "--portal-id", help="Limit to specific portal IDs."),
     send_mail: bool = typer.Option(True, "--send-mail/--no-send-mail", help="Email when restore is ready."),
     max_chars: int = typer.Option(3500, "--max-chars", help="Max JSON character length per restore request."),
     timeout: int = typer.Option(120, "--timeout", help="HTTP timeout seconds per request."),
@@ -245,12 +237,12 @@ def restore_command(
     ensure_project_dirs(paths)
     init_db(paths.db_path)
 
-    tok: Optional[str] = None if dry_run else get_token(token)
+    tok: str | None = None if dry_run else get_token(token)
 
     # Fetch approvals + needed portal metadata
     conn = connect(paths.db_path)
     try:
-        params: List[object] = []
+        params: list[object] = []
         where = ""
         if portal_id:
             where = f"WHERE a.portal_id IN ({','.join('?' for _ in portal_id)})"
@@ -301,7 +293,7 @@ def restore_command(
     payloads = chunk_restore_payloads(blocks, send_mail=send_mail, max_chars=max_chars)
 
     # Write payloads + responses
-    request_id = _now_tag()
+    request_id = now_tag()
     out_dir = project_dir / "restore_requests" / request_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -321,7 +313,7 @@ def restore_command(
             """,
             (
                 request_id,
-                _now_iso(),
+                now_iso(),
                 str(out_dir.relative_to(project_dir)),
                 1 if dry_run else 0,
                 "planned" if dry_run else "running",
@@ -341,7 +333,7 @@ def restore_command(
     n_posted = 0
 
     n_errors = 0
-    fatal_error: Optional[BaseException] = None
+    fatal_error: BaseException | None = None
 
     if not dry_run:
         with responses_path.open("w", encoding="utf-8") as rf:
@@ -433,7 +425,7 @@ def restore_command(
     log_event(
         project_dir,
         {
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "event": "restore",
             "n_portals": len(norm_rows),
             "n_datasets": len(blocks),

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from fungalphylo.core.manifest import read_manifest
 from fungalphylo.core.paths import ProjectPaths
@@ -26,7 +26,7 @@ def load_run_manifest(paths: ProjectPaths, run_id: str) -> dict[str, Any]:
     return read_manifest(paths.run_manifest(run_id))
 
 
-def resolve_batch_root(paths: ProjectPaths, run_id: str, manifest: Optional[dict[str, Any]] = None) -> Path:
+def resolve_batch_root(paths: ProjectPaths, run_id: str, manifest: dict[str, Any] | None = None) -> Path:
     if manifest is None:
         manifest = load_run_manifest(paths, run_id)
     batch_root = (
@@ -41,7 +41,7 @@ def resolve_batch_root(paths: ProjectPaths, run_id: str, manifest: Optional[dict
     return expected_batch_root(paths, run_id, str(staging_id))
 
 
-def resolve_batch_summary(paths: ProjectPaths, run_id: str, manifest: Optional[dict[str, Any]] = None) -> Path:
+def resolve_batch_summary(paths: ProjectPaths, run_id: str, manifest: dict[str, Any] | None = None) -> Path:
     if manifest is None:
         manifest = load_run_manifest(paths, run_id)
     summary_path = manifest.get("paths", {}).get("batch_summary")

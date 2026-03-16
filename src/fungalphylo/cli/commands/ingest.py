@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import re
-import typer
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+
+import typer
 
 from fungalphylo.core.events import log_event
+from fungalphylo.core.ids import now_iso
 from fungalphylo.core.paths import ProjectPaths
 from fungalphylo.core.tabular import read_table
 from fungalphylo.db.db import connect
@@ -18,13 +18,12 @@ PORTAL_FROM_URL_RE = re.compile(r"https?://mycocosm\.jgi\.doe\.gov/([^/?#]+)")
 app = typer.Typer(help="Ingest portal and file metadata tables into the project database.")
 
 
-def portal_id_from_mycocosm_url(url: str) -> Optional[str]:
+def portal_id_from_mycocosm_url(url: str) -> str | None:
     m = PORTAL_FROM_URL_RE.search(url.strip())
     return m.group(1) if m else None
 
 
-def _pick_col(fieldnames: list[str], *candidates: str) -> Optional[str]:
-    lower = {c.lower(): c for c in fieldnames}
+def _pick_col(fieldnames: list[str], *candidates: str) -> str | None:
     for cand in candidates:
         for k in fieldnames:
             if k.lower() == cand.lower():
@@ -32,16 +31,12 @@ def _pick_col(fieldnames: list[str], *candidates: str) -> Optional[str]:
     return None
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 @app.callback(invoke_without_command=True)
 def ingest_command(
     ctx: typer.Context,
     project_dir: Path = typer.Argument(None, help="Project directory"),
     table_path: Path = typer.Option(..., "--table", help="Path to a TSV/CSV(.gz) table to ingest"),
-    delimiter: Optional[str] = typer.Option(None, "--delimiter", help="Override delimiter (default: auto)"),
+    delimiter: str | None = typer.Option(None, "--delimiter", help="Override delimiter (default: auto)"),
 ) -> None:
     """
     Ingest a table into the DB. Auto-detects whether it contains:
@@ -129,7 +124,7 @@ def ingest_command(
                 (
                     portal_id,
                     name,
-                    _now(),
+                    now_iso(),
                     published_text or None,
                     published_url or None,
                     is_published,
@@ -187,7 +182,7 @@ def ingest_command(
                         filename,
                         size_bytes,
                         md5,
-                        _now(),
+                        now_iso(),
                         json.dumps(file_meta, ensure_ascii=False),
                     ),
                 )
@@ -200,7 +195,7 @@ def ingest_command(
     log_event(
         project_dir,
         {
-            "ts": _now(),
+            "ts": now_iso(),
             "event": "ingest",
             "table": str(table_path),
             "delimiter": meta.delimiter,

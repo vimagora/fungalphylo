@@ -4,17 +4,18 @@ import csv
 import html
 import shutil
 import tarfile
-from datetime import datetime, timezone
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any
 
 import requests
 import typer
 
 from fungalphylo.core.busco import parse_batch_summary, resolve_batch_summary, resolve_portal_id
-from fungalphylo.core.manifest import read_manifest
 from fungalphylo.core.errors import exception_record, log_error_jsonl
 from fungalphylo.core.events import log_event
+from fungalphylo.core.ids import now_iso, now_tag
+from fungalphylo.core.manifest import read_manifest
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.core.tabular import read_table
 from fungalphylo.db.db import connect, init_db
@@ -25,15 +26,7 @@ TAXONOMY_RANKS = ["phylum", "class", "order", "family", "genus", "species"]
 SUMMARY_RANKS = {"family", "order"}
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _now_tag() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-
-def _pick_col(fieldnames: list[str], *candidates: str) -> Optional[str]:
+def _pick_col(fieldnames: list[str], *candidates: str) -> str | None:
     lower = {c.lower(): c for c in fieldnames}
     for cand in candidates:
         hit = lower.get(cand.lower())
@@ -42,7 +35,7 @@ def _pick_col(fieldnames: list[str], *candidates: str) -> Optional[str]:
     return None
 
 
-def _normalized_rows(table_path: Path) -> tuple[str | None, Iterator[dict[str, str]], str, Optional[str]]:
+def _normalized_rows(table_path: Path) -> tuple[str | None, Iterator[dict[str, str]], str, str | None]:
     meta, rows = read_table(table_path)
     portal_col = _pick_col(meta.fieldnames, "portal_id", "portal", "portalid")
     taxon_col = _pick_col(meta.fieldnames, "ncbi_taxon_id", "taxon_id", "ncbi_taxid", "taxid")
@@ -224,7 +217,7 @@ def _load_busco_rows_from_db(paths: ProjectPaths, run_id: str) -> list[dict[str,
     ]
 
 
-def _load_busco_rows(paths: ProjectPaths, run_id: str, run_root: Path, busco_tsv: Optional[Path]) -> list[dict[str, Any]]:
+def _load_busco_rows(paths: ProjectPaths, run_id: str, run_root: Path, busco_tsv: Path | None) -> list[dict[str, Any]]:
     if busco_tsv is not None:
         resolved_busco_tsv = busco_tsv.expanduser().resolve()
         if not resolved_busco_tsv.exists():
@@ -514,7 +507,7 @@ def _render_taxonomy_busco_html(
 def fetch_ncbi_taxdump(
     project_dir: Path = typer.Argument(..., help="Project directory"),
     url: str = typer.Option(NCBI_NEW_TAXDUMP_URL, "--url", help="NCBI taxdump archive URL"),
-    out_dir: Optional[Path] = typer.Option(None, "--out-dir", help="Target directory for archive and extracted files"),
+    out_dir: Path | None = typer.Option(None, "--out-dir", help="Target directory for archive and extracted files"),
     extract: bool = typer.Option(True, "--extract/--no-extract", help="Extract the downloaded tar.gz archive"),
     force: bool = typer.Option(False, "--force", help="Redownload and re-extract even if files already exist"),
     timeout: int = typer.Option(300, "--timeout", help="HTTP timeout in seconds"),
@@ -537,7 +530,7 @@ def fetch_ncbi_taxdump(
             typer.echo(f"Extracted dir: {extracted_dir}")
         return
 
-    tmp_archive = archive_path.with_suffix(archive_path.suffix + f".{_now_tag()}.tmp")
+    tmp_archive = archive_path.with_suffix(archive_path.suffix + f".{now_tag()}.tmp")
     try:
         with requests.get(url, stream=True, timeout=timeout) as response:
             response.raise_for_status()
@@ -556,7 +549,7 @@ def fetch_ncbi_taxdump(
         log_event(
             project_dir,
             {
-                "ts": _now(),
+                "ts": now_iso(),
                 "event": "taxonomy_fetch_ncbi",
                 "url": url,
                 "archive_path": str(archive_path),
@@ -587,7 +580,7 @@ def fetch_ncbi_taxdump(
 @app.command("export")
 def export_taxonomy(
     project_dir: Path = typer.Argument(..., help="Project directory"),
-    out: Optional[Path] = typer.Option(None, "--out", help="Output TSV path"),
+    out: Path | None = typer.Option(None, "--out", help="Output TSV path"),
     approved_only: bool = typer.Option(
         False,
         "--approved-only",
@@ -603,7 +596,7 @@ def export_taxonomy(
         review_dir = project_dir / "review"
         review_dir.mkdir(parents=True, exist_ok=True)
         suffix = "approved" if approved_only else "all"
-        out = review_dir / f"taxonomy_edit_{suffix}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.tsv"
+        out = review_dir / f"taxonomy_edit_{suffix}_{now_tag()}.tsv"
     else:
         out = out.expanduser().resolve()
 
@@ -647,7 +640,7 @@ def export_taxonomy(
     log_event(
         project_dir,
         {
-            "ts": _now(),
+            "ts": now_iso(),
             "event": "taxonomy_export",
             "out": str(out),
             "approved_only": approved_only,
@@ -697,7 +690,6 @@ def apply_taxonomy(
                 raise typer.BadParameter(f"Unknown portal_id in taxonomy table: {portal_id}")
 
             raw_taxon = (row.get(taxon_col) or "").strip()
-            note = (row.get(note_col) or "").strip() if note_col else ""
             if raw_taxon == "":
                 if not allow_clear:
                     unchanged += 1
@@ -736,7 +728,7 @@ def apply_taxonomy(
     log_event(
         project_dir,
         {
-            "ts": _now(),
+            "ts": now_iso(),
             "event": "taxonomy_apply",
             "table": str(taxonomy_tsv),
             "dry_run": dry_run,
@@ -756,18 +748,18 @@ def apply_taxonomy(
 @app.command("busco-mockup")
 def busco_taxonomy_mockup(
     project_dir: Path = typer.Argument(..., help="Project directory"),
-    busco_tsv: Optional[Path] = typer.Option(None, "--busco-tsv", help="Override BUSCO summary TSV path"),
-    run_id: Optional[str] = typer.Option(None, "--run-id", help="BUSCO run ID to use (default: latest BUSCO run)"),
-    taxdump_dir: Optional[Path] = typer.Option(
+    busco_tsv: Path | None = typer.Option(None, "--busco-tsv", help="Override BUSCO summary TSV path"),
+    run_id: str | None = typer.Option(None, "--run-id", help="BUSCO run ID to use (default: latest BUSCO run)"),
+    taxdump_dir: Path | None = typer.Option(
         None, "--taxdump-dir", help="Directory containing names.dmp and nodes.dmp (default: cache/ncbi_taxonomy/new_taxdump)"
     ),
-    summary_rank: Optional[str] = typer.Option(
+    summary_rank: str | None = typer.Option(
         None, "--summary-rank", help="Optional taxonomy summary level: family or order"
     ),
     low_quality_threshold: float = typer.Option(
         85.0, "--low-quality-threshold", help="Highlight taxa below this complete BUSCO percentage"
     ),
-    out: Optional[Path] = typer.Option(None, "--out", help="Output HTML path"),
+    out: Path | None = typer.Option(None, "--out", help="Output HTML path"),
 ) -> None:
     project_dir = project_dir.expanduser().resolve()
     paths = ProjectPaths(project_dir)
@@ -869,7 +861,7 @@ def busco_taxonomy_mockup(
     log_event(
         project_dir,
         {
-            "ts": _now(),
+            "ts": now_iso(),
             "event": "taxonomy_busco_mockup",
             "run_id": selected_run_id,
             "busco_source": ("explicit_tsv" if busco_tsv is not None else "run_summary"),

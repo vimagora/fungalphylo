@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Iterable, Optional, Sequence
-
 import sqlite3
+from collections.abc import Sequence
 
 
 def fetch_approved_portals(conn: sqlite3.Connection) -> list[str]:
@@ -11,7 +9,7 @@ def fetch_approved_portals(conn: sqlite3.Connection) -> list[str]:
     return [r["portal_id"] for r in rows]
 
 
-def fetch_approvals_with_files(conn: sqlite3.Connection, portal_ids: Optional[Sequence[str]] = None) -> list[dict]:
+def fetch_approvals_with_files(conn: sqlite3.Connection, portal_ids: Sequence[str] | None = None) -> list[dict]:
     """
     Return per-portal approvals joined with portal_files to get filenames and kinds.
 

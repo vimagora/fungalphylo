@@ -412,6 +412,9 @@ pytest tests/test_protsetphylo_init.py -v
 ruff check .
 ruff format .
 
+# Type checking
+mypy src/fungalphylo
+
 # Quick compile check
 python -m compileall src
 ```

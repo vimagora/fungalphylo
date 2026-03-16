@@ -5,32 +5,22 @@ import json
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 import typer
 
-from fungalphylo.cli.commands.busco_slurm import infer_account_from_project_dir
-from fungalphylo.cli.commands.busco_slurm import resolve_staging_id
 from fungalphylo.core.events import log_event
 from fungalphylo.core.hash import hash_json
+from fungalphylo.core.ids import now_iso, now_tag
 from fungalphylo.core.manifest import write_manifest
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
+from fungalphylo.core.slurm import infer_account_from_project_dir, resolve_staging_id, shlex_quote
 from fungalphylo.core.tools import load_tools
 from fungalphylo.db.db import connect, init_db
 
 app = typer.Typer(help="Generate launcher-based SLURM scripts for InterProScan on staged proteomes.")
 
 SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_.-]+")
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _now_tag() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 def _safe_name(text: str) -> str:
@@ -79,11 +69,11 @@ def _load_json(path: Path) -> dict:
 def interproscan_slurm_command(
     ctx: typer.Context,
     project_dir: Path = typer.Argument(..., help="Project directory"),
-    staging_id: Optional[str] = typer.Option(None, "--staging-id", help="Staging snapshot to use (default: latest)."),
-    account: Optional[str] = typer.Option(None, "--account", help="SLURM account (overrides auto-detect)"),
+    staging_id: str | None = typer.Option(None, "--staging-id", help="Staging snapshot to use (default: latest)."),
+    account: str | None = typer.Option(None, "--account", help="SLURM account (overrides auto-detect)"),
     no_confirm: bool = typer.Option(False, "--no-confirm", help="Do not prompt to confirm detected account"),
-    run_id: Optional[str] = typer.Option(None, "--run-id", help="Run identifier (default: interproscan_<timestamp>)"),
-    resume_run_id: Optional[str] = typer.Option(
+    run_id: str | None = typer.Option(None, "--run-id", help="Run identifier (default: interproscan_<timestamp>)"),
+    resume_run_id: str | None = typer.Option(
         None,
         "--resume-run-id",
         help="Resume an existing InterProScan run without rewriting its queue ledger.",
@@ -93,7 +83,7 @@ def interproscan_slurm_command(
         "--application",
         help="InterProScan application to enable. Repeat the flag to request multiple applications.",
     ),
-    limit: Optional[int] = typer.Option(
+    limit: int | None = typer.Option(
         None, "--limit", min=1, help="Only include the first N staged proteomes in the queue (debugging aid)."
     ),
     fmt: list[str] = typer.Option(
@@ -105,20 +95,20 @@ def interproscan_slurm_command(
     time: str = typer.Option("48:00:00", "--time", help="SLURM time limit for the launcher job"),
     cpus: int = typer.Option(1, "--cpus", help="CPUs for the launcher job"),
     mem: str = typer.Option("1G", "--mem", help="Memory for the launcher job"),
-    worker_partition: Optional[str] = typer.Option(
+    worker_partition: str | None = typer.Option(
         None, "--worker-partition", help="SLURM partition for per-proteome worker jobs (default: launcher partition)"
     ),
-    worker_time: Optional[str] = typer.Option(
+    worker_time: str | None = typer.Option(
         None, "--worker-time", help="SLURM time limit for per-proteome worker jobs (default: launcher time)"
     ),
-    worker_cpus: Optional[int] = typer.Option(
+    worker_cpus: int | None = typer.Option(
         None, "--worker-cpus", help="CPUs for per-proteome worker jobs (default: launcher CPUs)"
     ),
-    worker_mem: Optional[str] = typer.Option(
+    worker_mem: str | None = typer.Option(
         None, "--worker-mem", help="Memory for per-proteome worker jobs (default: launcher memory)"
     ),
     poll_seconds: int = typer.Option(300, "--poll-seconds", help="Polling interval between proteome submissions"),
-    interproscan_bin_dir: Optional[Path] = typer.Option(
+    interproscan_bin_dir: Path | None = typer.Option(
         None, "--interproscan-bin-dir", help="Override InterProScan bin dir (else uses tools.yaml: interproscan.bin_dir)"
     ),
     submit: bool = typer.Option(False, "--submit", help="Submit the launcher with sbatch after writing scripts"),
@@ -201,7 +191,7 @@ def interproscan_slurm_command(
         effective_worker_time = worker_time or time
         effective_worker_cpus = worker_cpus or cpus
         effective_worker_mem = worker_mem or mem
-        rid = run_id or f"interproscan_{_now_tag()}"
+        rid = run_id or f"interproscan_{now_tag()}"
         manifest_data = {}
 
     if bin_dir is not None and not bin_dir.exists():
@@ -607,7 +597,7 @@ set -euo pipefail
         manifest_data = {
             "run_id": rid,
             "kind": "interproscan",
-            "created_at": _now_iso(),
+            "created_at": now_iso(),
             "staging_id": selected_staging_id,
             "project_dir": str(project_dir),
             "paths": {
@@ -669,7 +659,7 @@ set -euo pipefail
     log_event(
         project_dir,
         {
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "event": "slurm_interproscan_resume" if resume_mode else "slurm_interproscan_write",
             "run_id": rid,
             "staging_id": selected_staging_id,
@@ -702,7 +692,7 @@ set -euo pipefail
             log_event(
                 project_dir,
                 {
-                    "ts": _now_iso(),
+                    "ts": now_iso(),
                     "event": "slurm_interproscan_submit",
                     "run_id": rid,
                     "staging_id": selected_staging_id,
@@ -711,10 +701,8 @@ set -euo pipefail
                 },
             )
         except FileNotFoundError:
-            raise RuntimeError("sbatch not found on PATH. Submit manually with: sbatch <script>")
+            raise RuntimeError("sbatch not found on PATH. Submit manually with: sbatch <script>") from None
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"sbatch failed: {e.stderr.strip() if e.stderr else str(e)}")
+            raise RuntimeError(f"sbatch failed: {e.stderr.strip() if e.stderr else str(e)}") from e
 
 
-def shlex_quote(text: str) -> str:
-    return "'" + text.replace("'", "'\"'\"'") + "'"

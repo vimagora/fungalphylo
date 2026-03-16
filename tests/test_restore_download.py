@@ -4,25 +4,24 @@ import csv
 import io
 import json
 import zipfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import requests
 from typer.testing import CliRunner
 
-from fungalphylo.cli.commands.restore import get_token as get_restore_token
 from fungalphylo.cli.commands.download import move_files_using_manifest
-from fungalphylo.core.hash import md5_bytes
+from fungalphylo.cli.commands.restore import get_token as get_restore_token
 from fungalphylo.cli.main import app
+from fungalphylo.core.hash import md5_bytes
 from fungalphylo.core.paths import ProjectPaths
 from fungalphylo.db.db import connect
-
 
 runner = CliRunner()
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _init_project(project_dir: Path) -> ProjectPaths:
@@ -393,8 +392,8 @@ def test_download_retries_transient_http_error_then_succeeds(tmp_path: Path, mon
             raise requests.HTTPError("temporary failure", response=response)
         return _response_with_bytes(zip_content, headers={"Content-Disposition": 'attachment; filename="bundle.zip"'})
 
-    monkeypatch.setattr("fungalphylo.cli.commands.download.post_download", fake_post_download)
-    monkeypatch.setattr("fungalphylo.cli.commands.download.time.sleep", lambda _: None)
+    monkeypatch.setattr("fungalphylo.core.download.post_download", fake_post_download)
+    monkeypatch.setattr("fungalphylo.core.download.time.sleep", lambda _: None)
 
     result = runner.invoke(
         app,
@@ -750,7 +749,7 @@ def test_download_marks_failed_batch_for_non_zip_response(tmp_path: Path, monkey
     def fake_post_download(payload: dict, token: str, timeout: int = 300) -> requests.Response:
         return _response_with_bytes(b"not-a-zip", headers={"Content-Disposition": 'attachment; filename="bad.bin"'})
 
-    monkeypatch.setattr("fungalphylo.cli.commands.download.post_download", fake_post_download)
+    monkeypatch.setattr("fungalphylo.core.download.post_download", fake_post_download)
 
     result = runner.invoke(app, ["download", "--token", "test-token", str(project_dir)])
     assert result.exit_code == 0, result.output
@@ -784,7 +783,7 @@ def test_download_marks_failed_batch_when_manifest_missing(tmp_path: Path, monke
     def fake_post_download(payload: dict, token: str, timeout: int = 300) -> requests.Response:
         return _response_with_bytes(zip_content, headers={"Content-Disposition": 'attachment; filename="bundle.zip"'})
 
-    monkeypatch.setattr("fungalphylo.cli.commands.download.post_download", fake_post_download)
+    monkeypatch.setattr("fungalphylo.core.download.post_download", fake_post_download)
 
     result = runner.invoke(app, ["download", "--token", "test-token", str(project_dir)])
     assert result.exit_code == 0, result.output
@@ -823,7 +822,7 @@ def test_download_keeps_batch_summary_in_sqlite_and_details_on_disk(tmp_path: Pa
     def fake_post_download(payload: dict, token: str, timeout: int = 300) -> requests.Response:
         return _response_with_bytes(zip_content, headers={"Content-Disposition": 'attachment; filename="bundle.zip"'})
 
-    monkeypatch.setattr("fungalphylo.cli.commands.download.post_download", fake_post_download)
+    monkeypatch.setattr("fungalphylo.core.download.post_download", fake_post_download)
 
     result = runner.invoke(app, ["download", "--token", "test-token", str(project_dir)])
     assert result.exit_code == 0, result.output
@@ -888,8 +887,8 @@ def test_download_fail_fast_stops_after_first_exhausted_payload_error(tmp_path: 
         response._content = b"temporarily unavailable"
         raise requests.HTTPError("temporary failure", response=response)
 
-    monkeypatch.setattr("fungalphylo.cli.commands.download.post_download", fake_post_download)
-    monkeypatch.setattr("fungalphylo.cli.commands.download.time.sleep", lambda _: None)
+    monkeypatch.setattr("fungalphylo.core.download.post_download", fake_post_download)
+    monkeypatch.setattr("fungalphylo.core.download.time.sleep", lambda _: None)
 
     result = runner.invoke(
         app,

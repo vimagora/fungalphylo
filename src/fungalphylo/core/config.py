@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import Any
 
 import yaml
 
-
-DEFAULT_CONFIG: Dict[str, Any] = {
+DEFAULT_CONFIG: dict[str, Any] = {
     # General project-level settings
     "project": {
         # Put absolute paths here only if you need them; otherwise keep things relative to project_dir.
@@ -87,7 +87,7 @@ def write_default_config(path: Path, *, overwrite: bool = True) -> None:
         yaml.safe_dump(DEFAULT_CONFIG, f, sort_keys=False)
 
 
-def load_yaml(path: Path) -> Dict[str, Any]:
+def load_yaml(path: Path) -> dict[str, Any]:
     path = path.expanduser().resolve()
     if not path.exists():
         raise FileNotFoundError(f"Config not found: {path}")
@@ -98,13 +98,13 @@ def load_yaml(path: Path) -> Dict[str, Any]:
     return data
 
 
-def deep_merge(base: Dict[str, Any], override: Mapping[str, Any]) -> Dict[str, Any]:
+def deep_merge(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
     """
     Recursively merge `override` into `base` and return a new dict.
     - dict values merge recursively
     - non-dict values replace
     """
-    out: Dict[str, Any] = dict(base)
+    out: dict[str, Any] = dict(base)
     for k, v in override.items():
         if isinstance(v, dict) and isinstance(out.get(k), dict):
             out[k] = deep_merge(out[k], v)  # type: ignore[arg-type]
@@ -116,9 +116,9 @@ def deep_merge(base: Dict[str, Any], override: Mapping[str, Any]) -> Dict[str, A
 def resolve_config(
     *,
     project_config: Mapping[str, Any],
-    run_overrides: Optional[Mapping[str, Any]] = None,
-    cli_overrides: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, Any]:
+    run_overrides: Mapping[str, Any] | None = None,
+    cli_overrides: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """
     Resolve config with precedence:
       1) cli_overrides

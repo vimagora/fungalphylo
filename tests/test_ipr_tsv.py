@@ -3,8 +3,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from fungalphylo.core.ipr_tsv import IprHit, filter_by_accessions, parse_ipr_tsv
-
+from fungalphylo.core.ipr_tsv import filter_by_accessions, parse_ipr_tsv
 
 IPR_TSV_CONTENT = """\
 protein1\t1234\t500\tPfam\tPF00083\tSugar transporter\t10\t250\t1.2e-50\tT\t2024-01-01\tIPR005828\tMFS_1

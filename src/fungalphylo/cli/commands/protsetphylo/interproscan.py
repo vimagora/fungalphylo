@@ -1,40 +1,26 @@
 from __future__ import annotations
 
-import json
 import subprocess
-import sys
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 import typer
 
 from fungalphylo.core.events import log_event
 from fungalphylo.core.hash import hash_json
+from fungalphylo.core.ids import now_iso, now_tag
 from fungalphylo.core.manifest import write_manifest
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
+from fungalphylo.core.slurm import infer_account_from_project_dir, shlex_quote
 from fungalphylo.core.tools import load_tools
 from fungalphylo.db.db import connect, init_db
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _now_tag() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-
-def shlex_quote(text: str) -> str:
-    return "'" + text.replace("'", "'\"'\"'") + "'"
 
 
 def interproscan_command(
     project_dir: Path = typer.Argument(..., help="Project directory"),
     family_id: str = typer.Option(..., "--family-id", help="Family to run InterProScan on"),
-    account: Optional[str] = typer.Option(None, "--account", help="SLURM account"),
+    account: str | None = typer.Option(None, "--account", help="SLURM account"),
     no_confirm: bool = typer.Option(False, "--no-confirm", help="Skip account confirmation"),
-    run_id: Optional[str] = typer.Option(None, "--run-id", help="Run identifier"),
+    run_id: str | None = typer.Option(None, "--run-id", help="Run identifier"),
     application: list[str] = typer.Option(
         ["Pfam"],
         "--application",
@@ -45,7 +31,7 @@ def interproscan_command(
     time: str = typer.Option("12:00:00", "--time", help="SLURM time limit"),
     cpus: int = typer.Option(4, "--cpus", help="CPUs per task"),
     mem: str = typer.Option("8G", "--mem", help="Memory"),
-    interproscan_bin_dir: Optional[Path] = typer.Option(
+    interproscan_bin_dir: Path | None = typer.Option(
         None, "--interproscan-bin-dir", help="Override InterProScan bin dir"
     ),
     submit: bool = typer.Option(False, "--submit", help="Submit with sbatch after writing script"),
@@ -73,8 +59,6 @@ def interproscan_command(
         raise typer.BadParameter(f"Characterized FASTA not found: {char_fasta}")
 
     # Resolve account
-    from fungalphylo.cli.commands.busco_slurm import infer_account_from_project_dir
-
     acct = account or infer_account_from_project_dir(project_dir)
     if not acct:
         raise typer.BadParameter(
@@ -103,7 +87,7 @@ def interproscan_command(
         )
     ) or ["TSV"]
 
-    rid = run_id or f"family_ipr_{family_id}_{_now_tag()}"
+    rid = run_id or f"family_ipr_{family_id}_{now_tag()}"
 
     # Set up run directories
     ipr_output_dir = paths.family_characterized_dir(family_id) / "interproscan"
@@ -156,7 +140,7 @@ fi
     worker_path.chmod(0o755)
 
     # Write manifest and DB row
-    created_at = _now_iso()
+    created_at = now_iso()
     manifest_data = {
         "run_id": rid,
         "kind": "family_interproscan",
@@ -247,6 +231,6 @@ fi
             )
             typer.echo(res.stdout.strip() or "Submitted.")
         except FileNotFoundError:
-            raise RuntimeError("sbatch not found on PATH. Submit manually.")
+            raise RuntimeError("sbatch not found on PATH. Submit manually.") from None
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"sbatch failed: {e.stderr.strip() if e.stderr else str(e)}")
+            raise RuntimeError(f"sbatch failed: {e.stderr.strip() if e.stderr else str(e)}") from e

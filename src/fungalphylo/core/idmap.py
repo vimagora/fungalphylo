@@ -4,7 +4,6 @@ import csv
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict
 
 _CANON_RE = re.compile(r"^[A-Za-z0-9_.-]+\|\d+$")
 
@@ -21,9 +20,9 @@ def _is_na(value: str | None) -> bool:
 @dataclass(frozen=True)
 class PortalIdMap:
     portal_id: str
-    header_to_canon: Dict[str, str]        # original_header -> canonical_protein_id (primary)
-    model_to_canon: Dict[str, str]         # model_id -> canonical_protein_id (fallback)
-    model_to_transcript: Dict[str, str]    # model_id -> transcript_id (optional future use)
+    header_to_canon: dict[str, str]        # original_header -> canonical_protein_id (primary)
+    model_to_canon: dict[str, str]         # model_id -> canonical_protein_id (fallback)
+    model_to_transcript: dict[str, str]    # model_id -> transcript_id (optional future use)
 
 
 def _require_columns(path: Path, fieldnames: list[str] | None, required: set[str]) -> None:
@@ -37,9 +36,9 @@ def _read_per_portal_tsv(path: Path, portal_id: str) -> PortalIdMap:
     if not path.exists():
         raise FileNotFoundError(f"ID map file not found for portal {portal_id}: {path}")
 
-    header_to_canon: Dict[str, str] = {}
-    model_to_canon: Dict[str, str] = {}
-    model_to_transcript: Dict[str, str] = {}
+    header_to_canon: dict[str, str] = {}
+    model_to_canon: dict[str, str] = {}
+    model_to_transcript: dict[str, str] = {}
 
     with path.open("r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f, delimiter="\t")
@@ -156,9 +155,9 @@ def load_id_map(id_map_path: Path, portal_id: str, kind: str = "proteome") -> Po
         raise FileNotFoundError(f"--id-map not found: {id_map_path}")
 
     # Combined TSV. Filter rows by portal_id into an in-memory map.
-    header_to_canon: Dict[str, str] = {}
-    model_to_canon: Dict[str, str] = {}
-    model_to_transcript: Dict[str, str] = {}
+    header_to_canon: dict[str, str] = {}
+    model_to_canon: dict[str, str] = {}
+    model_to_transcript: dict[str, str] = {}
 
     with id_map_path.open("r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f, delimiter="\t")

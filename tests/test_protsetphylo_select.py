@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -16,7 +16,7 @@ runner = CliRunner()
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _init_project(project_dir: Path) -> ProjectPaths:
@@ -254,7 +254,7 @@ def test_select_evalue_threshold_filters(tmp_path: Path) -> None:
 
 def test_select_requires_characterized_ipr(tmp_path: Path) -> None:
     project_dir = tmp_path / "project"
-    paths = _init_project(project_dir)
+    _init_project(project_dir)
 
     tsv = tmp_path / "char.tsv"
     tsv.write_text(

@@ -4,15 +4,14 @@ import csv
 import json
 import re
 import shutil
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 import typer
 
 from fungalphylo.core.events import log_event
 from fungalphylo.core.fasta import FastaRecord, write_fasta
 from fungalphylo.core.hash import hash_json
+from fungalphylo.core.ids import now_iso
 from fungalphylo.core.manifest import write_manifest
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.db.db import connect, init_db
@@ -20,10 +19,6 @@ from fungalphylo.db.db import connect, init_db
 PFAM_RE = re.compile(r"^PF\d{5}$")
 SAFE_FAMILY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 REQUIRED_COLUMNS = {"portal_id", "species", "short_name", "protein_name", "sequence"}
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _sanitize_header_part(text: str) -> str:
@@ -95,8 +90,8 @@ def init_command(
     characterized: Path = typer.Option(
         ..., "--characterized", help="TSV with characterized proteins (portal_id, species, short_name, protein_name, sequence)"
     ),
-    pfam: Optional[list[str]] = typer.Option(None, "--pfam", help="Target Pfam accession (repeatable)"),
-    pfam_list: Optional[Path] = typer.Option(None, "--pfam-list", help="File with one Pfam accession per line"),
+    pfam: list[str] | None = typer.Option(None, "--pfam", help="Target Pfam accession (repeatable)"),
+    pfam_list: Path | None = typer.Option(None, "--pfam-list", help="File with one Pfam accession per line"),
 ) -> None:
     """Initialize a gene family for phylogenomic analysis."""
     project_dir = project_dir.expanduser().resolve()
@@ -156,7 +151,7 @@ def init_command(
     pfams_path.write_text("\n".join(pfam_accessions) + "\n", encoding="utf-8")
 
     # Write manifest
-    created_at = _now_iso()
+    created_at = now_iso()
     manifest_data = {
         "family_id": family_id,
         "created_at": created_at,

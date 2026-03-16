@@ -1,24 +1,19 @@
 from __future__ import annotations
 
 import csv
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
 
 import typer
 
 from fungalphylo.core.events import log_event
+from fungalphylo.core.ids import now_iso, now_tag
 from fungalphylo.core.paths import ProjectPaths
 from fungalphylo.db.db import connect
 
 app = typer.Typer(help="Human-in-the-loop review: export/edit/apply approvals.")
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _read_tsv(path: Path) -> List[dict]:
+def _read_tsv(path: Path) -> list[dict]:
     path = path.expanduser().resolve()
     with path.open("r", encoding="utf-8", newline="") as f:
         r = csv.DictReader(f, delimiter="\t")
@@ -31,15 +26,13 @@ def _read_tsv(path: Path) -> List[dict]:
 def export_review(
     project_dir: Path = typer.Argument(..., help="Project directory"),
     from_autoselect: Path = typer.Option(..., "--from-autoselect", help="autoselect_*.tsv file"),
-    out: Optional[Path] = typer.Option(None, "--out", help="Output review TSV path"),
+    out: Path | None = typer.Option(None, "--out", help="Output review TSV path"),
 ) -> None:
     """
     Convert autoselect output into an editable review TSV.
     Users edit proteome_file_id/cds_file_id, then run `review apply`.
     """
     project_dir = project_dir.expanduser().resolve()
-    paths = ProjectPaths(project_dir)
-
     rows = _read_tsv(from_autoselect)
     if not rows:
         raise typer.BadParameter("Autoselect TSV is empty.")
@@ -47,7 +40,7 @@ def export_review(
     if out is None:
         review_dir = project_dir / "review"
         review_dir.mkdir(parents=True, exist_ok=True)
-        out = review_dir / f"review_edit_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.tsv"
+        out = review_dir / f"review_edit_{now_tag()}.tsv"
 
     with out.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f, delimiter="\t")
@@ -134,7 +127,7 @@ def apply_review(
                   approved_at=excluded.approved_at,
                   note=excluded.note
                 """,
-                (pid, prot, cds, _now(), note),
+                (pid, prot, cds, now_iso(), note),
             )
             applied += 1
 
@@ -142,14 +135,14 @@ def apply_review(
     finally:
         conn.close()
 
-    log_event(project_dir, {"ts": _now(), "event": "review_apply", "rows_applied": applied, "rows_skipped": skipped})
+    log_event(project_dir, {"ts": now_iso(), "event": "review_apply", "rows_applied": applied, "rows_skipped": skipped})
     typer.echo(f"Applied approvals: {applied} (skipped: {skipped})")
 
 
 @app.command("show")
 def show_approvals(
     project_dir: Path = typer.Argument(..., help="Project directory"),
-    portal_id: Optional[List[str]] = typer.Option(None, "--portal-id", help="Limit to portals"),
+    portal_id: list[str] | None = typer.Option(None, "--portal-id", help="Limit to portals"),
 ) -> None:
     """
     Show current approvals.
@@ -159,7 +152,7 @@ def show_approvals(
 
     conn = connect(paths.db_path)
     try:
-        params: List[object] = []
+        params: list[object] = []
         where = ""
         if portal_id:
             where = f"WHERE a.portal_id IN ({','.join('?' for _ in portal_id)})"

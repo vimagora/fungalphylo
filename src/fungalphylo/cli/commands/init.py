@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 
 import typer
 
-from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.core.config import write_default_config
 from fungalphylo.core.events import log_event
-from fungalphylo.db.db import init_db
+from fungalphylo.core.ids import now_iso
+from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.core.tools import TOOLS_YAML_TEMPLATE
+from fungalphylo.db.db import init_db
 
 app = typer.Typer(help="Initialize a new fungalphylo project directory.")
 
@@ -59,7 +59,7 @@ def init_command(
     log_event(
         project_dir,
         {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": now_iso(),
             "event": "init",
             "project_dir": str(project_dir),
             "config_path": str(paths.config_yaml),

@@ -2,22 +2,24 @@ from __future__ import annotations
 
 import csv
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any
 
 import typer
 
 from fungalphylo.core.config import load_yaml, resolve_config
 from fungalphylo.core.events import log_event
+from fungalphylo.core.ids import now_iso, now_tag
 from fungalphylo.core.paths import ProjectPaths
 from fungalphylo.db.db import connect
 
 app = typer.Typer(help="Automatically select best proteome/CDS per portal (explainable).")
 
 DEFAULT_BAD_PATTERNS = ("deflines", "promoter", "alleles")
-DEFAULT_SCORE_WEIGHTS: Dict[str, float] = {
+DEFAULT_SCORE_WEIGHTS: dict[str, float] = {
     "data_group_genome": 50.0,
     "file_format_fasta": 20.0,
     "status_restored": 10.0,
@@ -49,15 +51,7 @@ LEGACY_WEIGHT_ALIASES = {
 }
 
 
-def _now_tag() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _parse_dt(s: Any) -> Optional[datetime]:
+def _parse_dt(s: Any) -> datetime | None:
     if not s:
         return None
     if isinstance(s, datetime):
@@ -70,20 +64,20 @@ def _parse_dt(s: Any) -> Optional[datetime]:
         return None
 
 
-def _meta(row) -> Dict[str, Any]:
+def _meta(row) -> dict[str, Any]:
     try:
         return json.loads(row["meta_json"]) if row["meta_json"] else {}
     except Exception:
         return {}
 
 
-def _contains_bad_keyword(filename: str, ban_patterns: Optional[List[str]] = None) -> bool:
+def _contains_bad_keyword(filename: str, ban_patterns: list[str] | None = None) -> bool:
     s = (filename or "").lower()
     bad = [p.lower() for p in (ban_patterns or list(DEFAULT_BAD_PATTERNS)) if p]
     return any(b in s for b in bad)
 
 
-def resolve_autoselect_weights(cfg: Mapping[str, Any]) -> Dict[str, float]:
+def resolve_autoselect_weights(cfg: Mapping[str, Any]) -> dict[str, float]:
     raw_weights = cfg.get("autoselect", {}).get("weights", {})
     resolved = dict(DEFAULT_SCORE_WEIGHTS)
 
@@ -111,7 +105,7 @@ def resolve_autoselect_weights(cfg: Mapping[str, Any]) -> Dict[str, float]:
     return resolved
 
 
-def resolve_ban_patterns(cfg: Mapping[str, Any]) -> List[str]:
+def resolve_ban_patterns(cfg: Mapping[str, Any]) -> list[str]:
     patterns = cfg.get("autoselect", {}).get("ban_patterns", [])
     if not isinstance(patterns, list):
         return list(DEFAULT_BAD_PATTERNS)
@@ -126,19 +120,19 @@ class Candidate:
     portal_id: str
     kind: str
     filename: str
-    size_bytes: Optional[int]
-    md5: Optional[str]
-    meta: Dict[str, Any]
+    size_bytes: int | None
+    md5: str | None
+    meta: dict[str, Any]
 
     # derived
     jat_label: str
     file_format: str
     data_group: str
-    modified_date: Optional[datetime]
-    file_date: Optional[datetime]
+    modified_date: datetime | None
+    file_date: datetime | None
     file_status: str
 
-    def newest_ts(self) -> Optional[datetime]:
+    def newest_ts(self) -> datetime | None:
         return self.modified_date or self.file_date
 
 
@@ -165,9 +159,9 @@ def score_candidate(
     c: Candidate,
     target: str,
     *,
-    weights: Optional[Mapping[str, float]] = None,
-    ban_patterns: Optional[List[str]] = None,
-) -> Tuple[float, Dict[str, Any]]:
+    weights: Mapping[str, float] | None = None,
+    ban_patterns: list[str] | None = None,
+) -> tuple[float, dict[str, Any]]:
     """
     target: "proteome" or "cds"
     Returns (score, breakdown dict)
@@ -177,7 +171,7 @@ def score_candidate(
         score_weights.update({k: float(v) for k, v in weights.items()})
 
     score = 0.0
-    why: Dict[str, Any] = {}
+    why: dict[str, Any] = {}
 
     # Hard excludes
     hard_reasons = []
@@ -252,13 +246,13 @@ def score_candidate(
 
 
 def top_n_sorted(
-    cands: List[Candidate],
+    cands: list[Candidate],
     target: str,
     n: int,
     *,
-    weights: Optional[Mapping[str, float]] = None,
-    ban_patterns: Optional[List[str]] = None,
-) -> List[Tuple[Candidate, float, Dict[str, Any]]]:
+    weights: Mapping[str, float] | None = None,
+    ban_patterns: list[str] | None = None,
+) -> list[tuple[Candidate, float, dict[str, Any]]]:
     scored = []
     for c in cands:
         s, why = score_candidate(c, target, weights=weights, ban_patterns=ban_patterns)
@@ -280,7 +274,7 @@ def top_n_sorted(
 def autoselect_command(
     ctx: typer.Context,
     project_dir: Path = typer.Argument(None, help="Project directory"),
-    portal_id: Optional[List[str]] = typer.Option(None, "--portal-id", help="Limit to specific portal IDs"),
+    portal_id: list[str] | None = typer.Option(None, "--portal-id", help="Limit to specific portal IDs"),
     published_only: bool = typer.Option(True, "--published-only/--all", help="Default: only published portals"),
     top_n: int = typer.Option(5, "--top-n", help="Top N candidates to include in explain report"),
 ) -> None:
@@ -299,14 +293,14 @@ def autoselect_command(
     review_dir = project_dir / "review"
     review_dir.mkdir(parents=True, exist_ok=True)
 
-    tag = _now_tag()
+    tag = now_tag()
     out_sel = review_dir / f"autoselect_{tag}.tsv"
     out_explain = review_dir / f"autoselect_explain_{tag}.tsv"
 
     conn = connect(paths.db_path)
     try:
         # portal list
-        params: List[object] = []
+        params: list[object] = []
         where = []
         if portal_id:
             where.append(f"portal_id IN ({','.join('?' for _ in portal_id)})")
@@ -334,7 +328,7 @@ def autoselect_command(
     finally:
         conn.close()
 
-    by_portal: Dict[str, List[Candidate]] = {pid: [] for pid in portal_ids}
+    by_portal: dict[str, list[Candidate]] = {pid: [] for pid in portal_ids}
     for r in rows:
         c = row_to_candidate(r)
         by_portal[c.portal_id].append(c)
@@ -350,7 +344,7 @@ def autoselect_command(
             "score", "explain_json"
         ])
 
-        selections: List[Tuple[str, str, Optional[str], Optional[str]]] = []
+        selections: list[tuple[str, str, str | None, str | None]] = []
 
         for pid in portal_ids:
             cands = by_portal.get(pid, [])
@@ -401,7 +395,7 @@ def autoselect_command(
     log_event(
         project_dir,
         {
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "event": "autoselect",
             "published_only": published_only,
             "n_portals": len(portal_ids),

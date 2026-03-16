@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, Optional, Tuple
 
 from fungalphylo.core.fasta import iter_fasta
-
 
 _CANONICAL_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+\|\d+$")  # {portal_id}|{jgi_protein_id}
 
@@ -36,7 +35,7 @@ def validate_fasta_headers_are_canonical(path: Path, *, max_errors: int = 20) ->
 
 
 def validate_mapping_file_rows(
-    rows: Iterable[Tuple[str, str, int]],
+    rows: Iterable[tuple[str, str, int]],
     *,
     max_errors: int = 20,
 ) -> None:

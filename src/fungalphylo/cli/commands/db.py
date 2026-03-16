@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 
 import typer
+
 from fungalphylo.core.paths import ProjectPaths
 
 app = typer.Typer(help="Run read-only SQL queries against the project database.")

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import csv
 import gzip
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Tuple
 
 import openpyxl
 
@@ -13,8 +13,8 @@ import openpyxl
 class Table:
     path: Path
     kind: str  # "delimited" or "excel"
-    delimiter: Optional[str]
-    fieldnames: List[str]
+    delimiter: str | None
+    fieldnames: list[str]
 
 
 def _open_text(path: Path):
@@ -33,7 +33,7 @@ def sniff_delimiter(sample: str) -> str:
         return "\t"
 
 
-def _read_excel(path: Path, sheet: Optional[str] = None) -> Tuple[Table, Iterator[Dict[str, str]]]:
+def _read_excel(path: Path, sheet: str | None = None) -> tuple[Table, Iterator[dict[str, str]]]:
     """
     Read first sheet (or named sheet) of an Excel workbook.
     Includes hyperlink targets as extra columns: <col>__link
@@ -55,9 +55,9 @@ def _read_excel(path: Path, sheet: Optional[str] = None) -> Tuple[Table, Iterato
 
     meta = Table(path=path, kind="excel", delimiter=None, fieldnames=fieldnames_extended)
 
-    def row_iter() -> Iterator[Dict[str, str]]:
+    def row_iter() -> Iterator[dict[str, str]]:
         for row in ws.iter_rows(min_row=2):
-            out: Dict[str, str] = {}
+            out: dict[str, str] = {}
             empty = True
             for h, cell in zip(headers, row):
                 if not h:
@@ -81,7 +81,7 @@ def _read_excel(path: Path, sheet: Optional[str] = None) -> Tuple[Table, Iterato
     return meta, row_iter()
 
 
-def read_table(path: Path, delimiter: Optional[str] = None) -> Tuple[Table, Iterator[Dict[str, str]]]:
+def read_table(path: Path, delimiter: str | None = None) -> tuple[Table, Iterator[dict[str, str]]]:
     """
     Return (Table metadata, iterator over rows as dict[str,str]).
     Supports:
@@ -105,7 +105,7 @@ def read_table(path: Path, delimiter: Optional[str] = None) -> Tuple[Table, Iter
 
     meta = Table(path=path, kind="delimited", delimiter=delim, fieldnames=list(reader.fieldnames))
 
-    def row_iter() -> Iterator[Dict[str, str]]:
+    def row_iter() -> Iterator[dict[str, str]]:
         try:
             for row in reader:
                 yield {k.strip(): (v.strip() if isinstance(v, str) else "") for k, v in row.items() if k is not None}

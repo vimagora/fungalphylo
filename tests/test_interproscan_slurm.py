@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,12 +13,11 @@ from fungalphylo.cli.main import app
 from fungalphylo.core.paths import ProjectPaths
 from fungalphylo.db.db import connect
 
-
 runner = CliRunner()
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _init_project(project_dir: Path) -> ProjectPaths:
@@ -28,7 +27,6 @@ def _init_project(project_dir: Path) -> ProjectPaths:
 
 
 def _seed_staging(paths: ProjectPaths, staging_id: str) -> None:
-    staging_dir = paths.staging_dir(staging_id)
     proteomes_dir = paths.staging_proteomes_dir(staging_id)
     proteomes_dir.mkdir(parents=True, exist_ok=True)
     (proteomes_dir / "PortalA.faa").write_text(">p1\nMPEPTIDE\n", encoding="utf-8")

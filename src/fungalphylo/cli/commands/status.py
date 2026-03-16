@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 import typer
 from rich.console import Console
@@ -21,7 +19,7 @@ app = typer.Typer(help="Show project status: portals, approvals, raw cache, rest
 console = Console()
 
 
-def _latest_subdir(path: Path) -> Optional[Path]:
+def _latest_subdir(path: Path) -> Path | None:
     if not path.exists():
         return None
     dirs = [p for p in path.iterdir() if p.is_dir()]
@@ -30,8 +28,8 @@ def _latest_subdir(path: Path) -> Optional[Path]:
     return sorted(dirs, key=lambda p: p.name)[-1]
 
 
-def _read_first_n_lines(path: Path, n: int = 10) -> List[str]:
-    lines: List[str] = []
+def _read_first_n_lines(path: Path, n: int = 10) -> list[str]:
+    lines: list[str] = []
     if not path.exists():
         return lines
     with path.open("r", encoding="utf-8") as f:
@@ -42,7 +40,7 @@ def _read_first_n_lines(path: Path, n: int = 10) -> List[str]:
     return lines
 
 
-def _count_files_in_dir(path: Path, suffixes: Tuple[str, ...] = (".json", ".jsonl", ".bin", ".zip", ".gz")) -> int:
+def _count_files_in_dir(path: Path, suffixes: tuple[str, ...] = (".json", ".jsonl", ".bin", ".zip", ".gz")) -> int:
     if not path.exists():
         return 0
     return sum(1 for p in path.rglob("*") if p.is_file() and p.suffix.lower() in suffixes)
@@ -130,8 +128,8 @@ def status_command(
     present = 0
     missing = 0
     mismatched = 0
-    missing_samples: List[str] = []
-    mismatched_samples: List[str] = []
+    missing_samples: list[str] = []
+    mismatched_samples: list[str] = []
 
     for r in rows:
         pid = r["portal_id"]
@@ -173,7 +171,7 @@ def status_command(
                 if len(missing_samples) < sample_missing:
                     missing_samples.append(f"{pid}\tcds\t{cds_raw}")
 
-    def ledger_batch_summary(row, kind: str) -> Dict[str, str]:
+    def ledger_batch_summary(row, kind: str) -> dict[str, str]:
         if row is None:
             return {"dir": "-", "status": "-", "payloads": "0", "result": "-"}
         request_dir = project_dir / row["request_dir"]
@@ -396,7 +394,7 @@ def failures_command(
     # 3. Recent errors from errors.jsonl
     errors_log = paths.errors_log
     if errors_log.exists():
-        lines: List[str] = []
+        lines: list[str] = []
         with errors_log.open("r", encoding="utf-8") as f:
             for line in f:
                 lines.append(line)

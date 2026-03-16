@@ -102,7 +102,7 @@ def test_tree_writes_fasttree_script(tmp_path: Path) -> None:
 
 def test_tree_requires_trimmed_alignment(tmp_path: Path) -> None:
     project_dir = tmp_path / "project"
-    paths = _init_project(project_dir)
+    _init_project(project_dir)
 
     tsv = tmp_path / "char.tsv"
     tsv.write_text(

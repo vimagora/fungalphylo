@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import gzip
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Generator, Iterable, Iterator, Optional, TextIO, Tuple
+from typing import TextIO
 
 
 @dataclass(frozen=True)
@@ -32,7 +33,7 @@ def iter_fasta(path: Path) -> Iterator[FastaRecord]:
       - sequences may span multiple lines
       - yields header without '>' and sequence as uppercase with no whitespace
     """
-    header: Optional[str] = None
+    header: str | None = None
     seq_parts: list[str] = []
 
     with _open_text(path, "rt") as f:
@@ -88,7 +89,7 @@ def write_fasta(
                 f.write(seq + "\n")
 
 
-def count_fasta(path: Path) -> Tuple[int, int]:
+def count_fasta(path: Path) -> tuple[int, int]:
     """
     Return (num_records, total_residues).
     """

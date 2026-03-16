@@ -2,21 +2,16 @@ from __future__ import annotations
 
 import csv
 import subprocess
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 import typer
 
 from fungalphylo.core.events import log_event
 from fungalphylo.core.fasta import FastaRecord, iter_fasta, write_fasta
+from fungalphylo.core.ids import now_iso
 from fungalphylo.core.manifest import read_manifest, write_manifest
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.db.db import connect, init_db
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _read_characterized_tsv(path: Path) -> list[dict[str, str]]:
@@ -33,7 +28,7 @@ def _sanitize_header_part(text: str) -> str:
 def build_fasta_command(
     project_dir: Path = typer.Argument(..., help="Project directory"),
     family_id: str = typer.Option(..., "--family-id", help="Family to build FASTA for"),
-    redundancy_tool: Optional[str] = typer.Option(
+    redundancy_tool: str | None = typer.Option(
         None,
         "--redundancy-tool",
         help="Tool for redundancy removal: cdhit or mmseqs2",
@@ -158,7 +153,7 @@ def build_fasta_command(
             seen_headers.add(rec.header)
 
     # Add characterized records that weren't associated with any portal in selected/
-    for portal_id, char_recs in portal_char_records.items():
+    for _portal_id, char_recs in portal_char_records.items():
         for rec in char_recs:
             if rec.header not in seen_headers:
                 all_records.append(rec)
@@ -195,7 +190,7 @@ def build_fasta_command(
                 if clstr.exists():
                     clstr.unlink()
             except FileNotFoundError:
-                raise typer.BadParameter("cd-hit not found on PATH")
+                raise typer.BadParameter("cd-hit not found on PATH") from None
         elif redundancy_tool == "mmseqs2":
             try:
                 tmp_dir = fasta_dir / "mmseqs_tmp"
@@ -219,7 +214,7 @@ def build_fasta_command(
 
                 shutil.rmtree(tmp_dir, ignore_errors=True)
             except FileNotFoundError:
-                raise typer.BadParameter("mmseqs not found on PATH")
+                raise typer.BadParameter("mmseqs not found on PATH") from None
 
     n_combined = sum(1 for _ in iter_fasta(combined_path))
 
@@ -237,7 +232,7 @@ def build_fasta_command(
     log_event(
         project_dir,
         {
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "event": "protsetphylo_build_fasta",
             "family_id": family_id,
             "n_combined": n_combined,

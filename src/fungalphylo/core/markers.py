@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -49,19 +48,19 @@ def should_run(run_dir: Path, *, force: bool = False, resume: bool = False) -> b
     return True
 
 
-def write_started(run_dir: Path, info: Optional[str] = None) -> None:
+def write_started(run_dir: Path, info: str | None = None) -> None:
     run_dir = run_dir.expanduser().resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
     path = run_dir / "STARTED"
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     content = ts if info is None else f"{ts}\n{info}\n"
     path.write_text(content, encoding="utf-8")
 
 
-def write_done(run_dir: Path, info: Optional[str] = None) -> None:
+def write_done(run_dir: Path, info: str | None = None) -> None:
     run_dir = run_dir.expanduser().resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
     path = run_dir / "DONE"
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     content = ts if info is None else f"{ts}\n{info}\n"
     path.write_text(content, encoding="utf-8")

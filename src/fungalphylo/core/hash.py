@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Mapping, Sequence, Tuple
+from typing import Any
 
 
 def md5_bytes(data: bytes) -> str:
@@ -65,7 +66,7 @@ def hash_dict(d: Mapping[str, Any]) -> str:
     return hash_json(d)
 
 
-def write_checksums_tsv(rows: Sequence[Tuple[str, str]], out_path: Path) -> None:
+def write_checksums_tsv(rows: Sequence[tuple[str, str]], out_path: Path) -> None:
     """
     Write checksums to a TSV file.
 

@@ -2,13 +2,23 @@ from __future__ import annotations
 
 import re
 import secrets
-from datetime import datetime, timezone
-from typing import Any, Mapping
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from typing import Any
 
 from fungalphylo.core.hash import hash_dict
 
-
 _ID_SAFE = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def now_iso() -> str:
+    """UTC ISO-8601 timestamp string."""
+    return datetime.now(UTC).isoformat()
+
+
+def now_tag() -> str:
+    """Compact UTC timestamp for IDs and filenames (e.g. 20260316T143000Z)."""
+    return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
 def sanitize_id(s: str) -> str:
@@ -27,7 +37,7 @@ def new_staging_id(prefix: str = "stg") -> str:
 
     Example: stg_20260304T121530Z_a1b2c3
     """
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     rand = secrets.token_hex(3)  # 6 hex chars
     return f"{prefix}_{ts}_{rand}"
 

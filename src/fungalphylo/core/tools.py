@@ -2,10 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
 
 import yaml
-
 
 TOOLS_YAML_TEMPLATE = """# tools.yaml - configure paths to executables/environments not provided by modules
 busco:
@@ -35,13 +33,13 @@ iqtree:
 
 @dataclass(frozen=True)
 class BuscoTool:
-    bin_dir: Optional[Path] = None
+    bin_dir: Path | None = None
     command: str = "busco"
 
 
 @dataclass(frozen=True)
 class InterProScanTool:
-    bin_dir: Optional[Path] = None
+    bin_dir: Path | None = None
     command: str = "cluster_interproscan"
 
 

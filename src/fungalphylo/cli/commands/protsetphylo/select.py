@@ -3,24 +3,19 @@ from __future__ import annotations
 import csv
 import json
 from collections import defaultdict
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 import typer
 
-from fungalphylo.cli.commands.busco_slurm import resolve_staging_id
 from fungalphylo.core.domain_arch import build_domain_architectures, compute_max_evalues
 from fungalphylo.core.events import log_event
 from fungalphylo.core.fasta import FastaRecord, iter_fasta, write_fasta
+from fungalphylo.core.ids import now_iso
 from fungalphylo.core.ipr_tsv import IprHit, filter_by_accessions, parse_ipr_tsv
 from fungalphylo.core.manifest import read_manifest, write_manifest
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
+from fungalphylo.core.slurm import resolve_staging_id
 from fungalphylo.db.db import connect, init_db
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _find_project_ipr_run(
@@ -81,10 +76,10 @@ def _collect_portal_ipr_hits(
 def select_command(
     project_dir: Path = typer.Argument(..., help="Project directory"),
     family_id: str = typer.Option(..., "--family-id", help="Family to select proteins for"),
-    staging_id: Optional[str] = typer.Option(
+    staging_id: str | None = typer.Option(
         None, "--staging-id", help="Staging snapshot (default: latest)"
     ),
-    project_ipr_run_id: Optional[str] = typer.Option(
+    project_ipr_run_id: str | None = typer.Option(
         None, "--project-ipr-run-id", help="Project InterProScan run ID (default: latest)"
     ),
     arch_mode: str = typer.Option(
@@ -259,7 +254,7 @@ def select_command(
     log_event(
         project_dir,
         {
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "event": "protsetphylo_select",
             "family_id": family_id,
             "project_ipr_run_id": ipr_run_id,

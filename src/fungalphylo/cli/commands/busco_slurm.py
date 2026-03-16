@@ -1,62 +1,26 @@
 from __future__ import annotations
 
 import json
-import re
 import subprocess
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 import typer
 
 from fungalphylo.core.busco import batch_root_name
 from fungalphylo.core.events import log_event
 from fungalphylo.core.hash import hash_json
+from fungalphylo.core.ids import now_iso, now_tag
 from fungalphylo.core.manifest import write_manifest
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
+from fungalphylo.core.slurm import infer_account_from_project_dir, resolve_staging_id
 from fungalphylo.core.tools import load_tools
-from fungalphylo.db.db import connect, init_db
+from fungalphylo.db.db import connect
 
 app = typer.Typer(help="Generate (and optionally submit) a SLURM job for BUSCO on a staging snapshot.")
-
-_SCRATCH_ACCOUNT_RE = re.compile(r"^/scratch/([^/]+)/")
-
-
-def _now_tag() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def infer_account_from_project_dir(project_dir: Path) -> Optional[str]:
-    p = str(project_dir.resolve()).replace("\\", "/")
-    m = _SCRATCH_ACCOUNT_RE.match(p)
-    return m.group(1) if m else None
 
 
 def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
-
-
-def resolve_staging_id(project_dir: Path, explicit: Optional[str]) -> str:
-    if explicit:
-        return explicit
-
-    paths = ProjectPaths(project_dir)
-    init_db(paths.db_path)
-    conn = connect(paths.db_path)
-    try:
-        row = conn.execute(
-            "SELECT staging_id FROM stagings ORDER BY created_at DESC LIMIT 1"
-        ).fetchone()
-    finally:
-        conn.close()
-
-    if row is None:
-        raise typer.BadParameter("No staging snapshot found. Run `fungalphylo stage` first or pass --staging-id.")
-    return row["staging_id"]
 
 
 def _load_json(path: Path) -> dict:
@@ -160,7 +124,7 @@ def _submit_script(script_path: Path, project_dir: Path, rid: str, selected_stag
         log_event(
             project_dir,
             {
-                "ts": _now_iso(),
+                "ts": now_iso(),
                 "event": "slurm_busco_submit",
                 "run_id": rid,
                 "staging_id": selected_staging_id,
@@ -169,32 +133,32 @@ def _submit_script(script_path: Path, project_dir: Path, rid: str, selected_stag
             },
         )
     except FileNotFoundError:
-        raise RuntimeError("sbatch not found on PATH. Submit manually with: sbatch <script>")
+        raise RuntimeError("sbatch not found on PATH. Submit manually with: sbatch <script>") from None
     except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"sbatch failed: {e.stderr.strip() if e.stderr else str(e)}")
+        raise RuntimeError(f"sbatch failed: {e.stderr.strip() if e.stderr else str(e)}") from e
 
 
 @app.callback(invoke_without_command=True)
 def busco_slurm_command(
     ctx: typer.Context,
     project_dir: Path = typer.Argument(..., help="Project directory (typically under /scratch/<account>/...)"),
-    staging_id: Optional[str] = typer.Option(None, "--staging-id", help="Staging snapshot to use (default: latest)."),
-    lineage: Optional[str] = typer.Option(None, "--lineage", help="BUSCO lineage dataset name, e.g. fungi_odb12"),
-    time: Optional[str] = typer.Option(None, "--time", help="SLURM time limit, e.g. 24:00:00"),
-    cpus: Optional[int] = typer.Option(None, "--cpus", help="CPUs per task"),
-    mem_per_cpu: Optional[str] = typer.Option(None, "--mem-per-cpu", help="Memory per CPU, e.g. 2G"),
-    partition: Optional[str] = typer.Option(None, "--partition", help="SLURM partition"),
-    account: Optional[str] = typer.Option(None, "--account", help="SLURM account (overrides auto-detect)"),
+    staging_id: str | None = typer.Option(None, "--staging-id", help="Staging snapshot to use (default: latest)."),
+    lineage: str | None = typer.Option(None, "--lineage", help="BUSCO lineage dataset name, e.g. fungi_odb12"),
+    time: str | None = typer.Option(None, "--time", help="SLURM time limit, e.g. 24:00:00"),
+    cpus: int | None = typer.Option(None, "--cpus", help="CPUs per task"),
+    mem_per_cpu: str | None = typer.Option(None, "--mem-per-cpu", help="Memory per CPU, e.g. 2G"),
+    partition: str | None = typer.Option(None, "--partition", help="SLURM partition"),
+    account: str | None = typer.Option(None, "--account", help="SLURM account (overrides auto-detect)"),
     no_confirm: bool = typer.Option(False, "--no-confirm", help="Do not prompt to confirm detected account"),
-    run_id: Optional[str] = typer.Option(None, "--run-id", help="Run identifier (default: busco_<timestamp>)"),
-    resume_run_id: Optional[str] = typer.Option(
+    run_id: str | None = typer.Option(None, "--run-id", help="Run identifier (default: busco_<timestamp>)"),
+    resume_run_id: str | None = typer.Option(
         None,
         "--resume-run-id",
         help="Resume an existing BUSCO run: refresh the script and optionally resubmit.",
     ),
     force: bool = typer.Option(False, "--force", help="Pass -f to BUSCO (overwrite existing output)"),
     submit: bool = typer.Option(False, "--submit", help="Submit with sbatch after writing script"),
-    busco_bin_dir: Optional[Path] = typer.Option(
+    busco_bin_dir: Path | None = typer.Option(
         None, "--busco-bin-dir", help="Override BUSCO bin dir (else uses tools.yaml: busco.bin_dir)"
     ),
 ) -> None:
@@ -261,7 +225,7 @@ def busco_slurm_command(
         tools = load_tools(project_dir)
         bin_dir = busco_bin_dir.expanduser().resolve() if busco_bin_dir else tools.busco.bin_dir
         busco_cmd = tools.busco.command or "busco"
-        rid = run_id or f"busco_{_now_tag()}"
+        rid = run_id or f"busco_{now_tag()}"
 
         # Apply defaults for new-run mode
         lineage = lineage or "fungi_odb12"
@@ -329,7 +293,7 @@ def busco_slurm_command(
         manifest_data = {
             "run_id": rid,
             "kind": "busco",
-            "created_at": _now_iso(),
+            "created_at": now_iso(),
             "staging_id": selected_staging_id,
             "project_dir": str(project_dir),
             "paths": {
@@ -384,7 +348,7 @@ def busco_slurm_command(
     log_event(
         project_dir,
         {
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "event": "slurm_busco_resume" if resume_mode else "slurm_busco_write",
             "run_id": rid,
             "staging_id": selected_staging_id,

@@ -1,56 +1,31 @@
 from __future__ import annotations
 
 import json
-import os
-from datetime import datetime, timezone
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any
 
 import requests
 import typer
 from rich.progress import (
-    Progress,
     BarColumn,
-    TimeRemainingColumn,
-    TextColumn,
     MofNCompleteColumn,
+    Progress,
+    TextColumn,
+    TimeRemainingColumn,
 )
 
+from fungalphylo.core.errors import exception_record, log_error_jsonl
 from fungalphylo.core.events import log_event
+from fungalphylo.core.ids import now_iso
+from fungalphylo.core.jgi_auth import get_token
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.db.db import connect
-from fungalphylo.core.errors import log_error_jsonl, exception_record
 
 app = typer.Typer(help="Fetch and cache JGI Files search index; ingest results into portal_files.")
 
 SEARCH_URL = "https://files.jgi.doe.gov/search/"
 PORTAL_WIDTH = 16
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def get_token(explicit: Optional[str]) -> str:
-    """
-    Token handling:
-      - if --token provided, use it
-      - else read env JGI_TOKEN
-    Accepts either:
-      - "/api/sessions/...."
-      - "Bearer /api/sessions/...."
-    """
-    if explicit:
-        tok = explicit.strip()
-    else:
-        tok = os.getenv("JGI_TOKEN", "").strip()
-
-    if not tok:
-        raise typer.BadParameter("Missing JGI token. Provide --token or set env var JGI_TOKEN.")
-
-    if not tok.lower().startswith("bearer "):
-        tok = f"Bearer {tok}"
-    return tok
 
 
 def classify_kind(file_name: str, file_format: str, jat_label: str, file_type: Any) -> str:
@@ -97,7 +72,7 @@ def fetch_search_json(
     page: int = 1,
     page_size: int = 50,
     timeout: int = 120,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     params = {
         "q": portal_id,
         "f": "mycocosm_portal_id",
@@ -128,19 +103,18 @@ def iter_org_and_files(payload: dict):
             yield dataset_id, top_hit_id, f
 
 
-def iter_file_entries(payload: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
+def iter_file_entries(payload: dict[str, Any]) -> Iterable[dict[str, Any]]:
     orgs = payload.get("organisms") or []
     for org in orgs:
-        for f in (org.get("files") or []):
-            yield f
+        yield from org.get("files") or []
 
 
 @app.callback(invoke_without_command=True)
 def fetch_index_command(
     ctx: typer.Context,
     project_dir: Path = typer.Argument(None, help="Project directory"),
-    portal_id: Optional[List[str]] = typer.Option(None, "--portal-id", help="Limit to specific portal IDs."),
-    token: Optional[str] = typer.Option(None, "--token", help="JGI token (else uses env JGI_TOKEN)."),
+    portal_id: list[str] | None = typer.Option(None, "--portal-id", help="Limit to specific portal IDs."),
+    token: str | None = typer.Option(None, "--token", help="JGI token (else uses env JGI_TOKEN)."),
     page_size: int = typer.Option(50, "--page-size", help="Page size (API max is typically 50)."),
     cache_only: bool = typer.Option(False, "--cache-only", help="Only cache JSON, do not ingest into DB."),
     overwrite_cache: bool = typer.Option(False, "--overwrite-cache", help="Refetch even if cache exists."),
@@ -162,7 +136,7 @@ def fetch_index_command(
     project_dir = project_dir.expanduser().resolve()
     paths = ProjectPaths(project_dir)
     ensure_project_dirs(paths)
-    tok: Optional[str] = None
+    tok: str | None = None
     if not ingest_from_cache:
         tok = get_token(token)
 
@@ -209,7 +183,7 @@ def fetch_index_command(
             cache_path = paths.jgi_index_cache_dir / f"{pid}.json"
 
             try:
-                merged_payload: Optional[Dict[str, Any]] = None
+                merged_payload: dict[str, Any] | None = None
 
                 if ingest_from_cache:
                     if not cache_path.exists():
@@ -225,7 +199,7 @@ def fetch_index_command(
 
                     # Fetch pages
                     page = 1
-                    merged_payload = {"pages": [], "portal_id": pid, "fetched_at": _now()}
+                    merged_payload = {"pages": [], "portal_id": pid, "fetched_at": now_iso()}
                     while True:
                         assert tok is not None
                         payload = fetch_search_json(pid, tok, page=page, page_size=page_size)
@@ -344,7 +318,7 @@ def fetch_index_command(
                                     file_name,
                                     int(file_size) if isinstance(file_size, int) else (int(file_size) if file_size else None),
                                     md5sum,
-                                    _now(),
+                                    now_iso(),
                                     json.dumps(meta_json, ensure_ascii=False),
                                 ),
                             )
@@ -396,7 +370,7 @@ def fetch_index_command(
     log_event(
         project_dir,
         {
-            "ts": _now(),
+            "ts": now_iso(),
             "event": "fetch_index",
             "n_portals": total_portals,
             "n_files_upserted": total_files,

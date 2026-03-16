@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import json
 import traceback
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
-def log_error_jsonl(log_path: Path, record: Dict[str, Any]) -> None:
+def log_error_jsonl(log_path: Path, record: dict[str, Any]) -> None:
     """
     Append one JSON record to a JSONL error log.
     """
@@ -22,7 +22,7 @@ def log_error_jsonl(log_path: Path, record: Dict[str, Any]) -> None:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def exception_record(exc: BaseException) -> Dict[str, Any]:
+def exception_record(exc: BaseException) -> dict[str, Any]:
     return {
         "exc_type": type(exc).__name__,
         "exc_msg": str(exc),

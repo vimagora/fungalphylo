@@ -1,36 +1,26 @@
 from __future__ import annotations
 
-import json
 import subprocess
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 import typer
 
-from fungalphylo.cli.commands.busco_slurm import infer_account_from_project_dir
 from fungalphylo.core.events import log_event
 from fungalphylo.core.hash import hash_json
-from fungalphylo.core.manifest import read_manifest, write_manifest
+from fungalphylo.core.ids import now_iso, now_tag
+from fungalphylo.core.manifest import write_manifest
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
+from fungalphylo.core.slurm import infer_account_from_project_dir
 from fungalphylo.core.tools import load_tools
 from fungalphylo.db.db import connect, init_db
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _now_tag() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 def tree_command(
     project_dir: Path = typer.Argument(..., help="Project directory"),
     family_id: str = typer.Option(..., "--family-id", help="Family to build tree for"),
-    account: Optional[str] = typer.Option(None, "--account", help="SLURM account"),
+    account: str | None = typer.Option(None, "--account", help="SLURM account"),
     no_confirm: bool = typer.Option(False, "--no-confirm", help="Skip account confirmation"),
-    run_id: Optional[str] = typer.Option(None, "--run-id", help="Run identifier"),
+    run_id: str | None = typer.Option(None, "--run-id", help="Run identifier"),
     tree_method: str = typer.Option("iqtree", "--tree-method", help="Tree method: iqtree or fasttree"),
     model: str = typer.Option("MFP", "--model", help="Substitution model (IQ-TREE)"),
     bootstrap: int = typer.Option(1000, "--bootstrap", help="Bootstrap replicates (IQ-TREE -bb)"),
@@ -86,7 +76,7 @@ def tree_command(
     tree_dir = paths.family_tree_dir(family_id)
     tree_dir.mkdir(parents=True, exist_ok=True)
 
-    rid = run_id or f"tree_{family_id}_{_now_tag()}"
+    rid = run_id or f"tree_{family_id}_{now_tag()}"
     run_root = paths.run_dir(rid)
     slurm_dir = run_root / "slurm"
     logs_dir = project_dir / "logs" / "slurm"
@@ -139,7 +129,7 @@ set -euo pipefail
     script_path.chmod(0o755)
 
     # Write manifest
-    created_at = _now_iso()
+    created_at = now_iso()
     manifest_data = {
         "run_id": rid,
         "kind": "family_tree",
@@ -211,6 +201,6 @@ set -euo pipefail
             )
             typer.echo(res.stdout.strip() or "Submitted.")
         except FileNotFoundError:
-            raise RuntimeError("sbatch not found on PATH. Submit manually.")
+            raise RuntimeError("sbatch not found on PATH. Submit manually.") from None
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"sbatch failed: {e.stderr.strip() if e.stderr else str(e)}")
+            raise RuntimeError(f"sbatch failed: {e.stderr.strip() if e.stderr else str(e)}") from e

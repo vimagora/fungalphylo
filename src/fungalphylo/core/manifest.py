@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 
-def write_manifest(path: Path, data: Dict[str, Any]) -> None:
+def write_manifest(path: Path, data: dict[str, Any]) -> None:
     """
     Write a JSON manifest atomically.
     """
@@ -19,7 +19,7 @@ def write_manifest(path: Path, data: Dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-def read_manifest(path: Path) -> Dict[str, Any]:
+def read_manifest(path: Path) -> dict[str, Any]:
     path = path.expanduser().resolve()
     if not path.exists():
         raise FileNotFoundError(f"Manifest not found: {path}")

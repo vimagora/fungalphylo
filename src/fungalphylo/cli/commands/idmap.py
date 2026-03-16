@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import re
 from pathlib import Path
-from typing import Optional
 
 import typer
 
@@ -38,7 +37,7 @@ def template(
     project_dir: Path = typer.Argument(..., help="Project directory"),
     portal_id: str = typer.Option(..., "--portal-id", help="Portal to build a template for"),
     kind: str = typer.Option("proteome", "--kind", help="proteome or cds"),
-    out: Optional[Path] = typer.Option(
+    out: Path | None = typer.Option(
         None,
         "--out",
         help="Output TSV path (default: <project>/<staging.default_idmaps_dir>/<portal_id>.<kind>.tsv)",

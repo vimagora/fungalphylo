@@ -5,9 +5,8 @@ implementation has drifted from the documented restart semantics.
 """
 from __future__ import annotations
 
-import csv
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -20,7 +19,7 @@ runner = CliRunner()
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _write_text(path: Path, text: str) -> None:

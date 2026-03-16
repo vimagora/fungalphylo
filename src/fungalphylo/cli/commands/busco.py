@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 import typer
 
 from fungalphylo.core.busco import parse_batch_summary, resolve_batch_root, resolve_batch_summary
 from fungalphylo.core.events import log_event
+from fungalphylo.core.ids import now_iso
 from fungalphylo.core.manifest import read_manifest
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.db.db import connect, init_db
@@ -15,11 +14,7 @@ from fungalphylo.db.db import connect, init_db
 app = typer.Typer(help="Inspect and ingest BUSCO result summaries.")
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _latest_busco_run_id(paths: ProjectPaths) -> Optional[str]:
+def _latest_busco_run_id(paths: ProjectPaths) -> str | None:
     conn = connect(paths.db_path)
     try:
         row = conn.execute(
@@ -39,8 +34,8 @@ def _latest_busco_run_id(paths: ProjectPaths) -> Optional[str]:
 @app.command("ingest-results")
 def ingest_results(
     project_dir: Path = typer.Argument(..., help="Project directory"),
-    run_id: Optional[str] = typer.Option(None, "--run-id", help="BUSCO run ID to ingest (default: latest BUSCO run)"),
-    batch_summary: Optional[Path] = typer.Option(
+    run_id: str | None = typer.Option(None, "--run-id", help="BUSCO run ID to ingest (default: latest BUSCO run)"),
+    batch_summary: Path | None = typer.Option(
         None, "--batch-summary", help="Override BUSCO batch_summary.txt path"
     ),
 ) -> None:
@@ -62,7 +57,7 @@ def ingest_results(
         raise typer.BadParameter(f"BUSCO batch summary not found: {summary_path}")
 
     batch_root = resolve_batch_root(paths, selected_run_id, manifest)
-    imported_at = _now()
+    imported_at = now_iso()
     rows = parse_batch_summary(summary_path)
     if not rows:
         raise typer.BadParameter(f"BUSCO batch summary is empty: {summary_path}")

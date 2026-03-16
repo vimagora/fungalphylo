@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
 import tarfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-import io
 
 from typer.testing import CliRunner
 
@@ -13,12 +13,11 @@ from fungalphylo.cli.main import app
 from fungalphylo.core.paths import ProjectPaths
 from fungalphylo.db.db import connect, init_db
 
-
 runner = CliRunner()
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _init_project(project_dir: Path) -> ProjectPaths:
