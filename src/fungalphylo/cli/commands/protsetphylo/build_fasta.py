@@ -14,6 +14,40 @@ from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.db.db import connect, init_db
 
 
+def _cdhit_clstr_to_tsv(clstr_path: Path, out_path: Path) -> None:
+    """Convert a CD-HIT .clstr file to a two-column TSV (representative, member)."""
+    import re
+
+    clusters: list[tuple[str, list[str]]] = []
+    current_members: list[str] = []
+    representative: str | None = None
+
+    with clstr_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith(">Cluster"):
+                if representative and current_members:
+                    clusters.append((representative, current_members))
+                current_members = []
+                representative = None
+                continue
+            m = re.search(r">(.+?)\.\.\.", line)
+            if not m:
+                continue
+            name = m.group(1)
+            current_members.append(name)
+            if line.rstrip().endswith("*"):
+                representative = name
+    if representative and current_members:
+        clusters.append((representative, current_members))
+
+    with out_path.open("w", encoding="utf-8") as f:
+        f.write("representative\tmember\n")
+        for rep, members in clusters:
+            for member in members:
+                f.write(f"{rep}\t{member}\n")
+
+
 def _read_characterized_tsv(path: Path) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8", newline="") as f:
         return list(csv.DictReader(f, delimiter="\t"))
@@ -169,6 +203,14 @@ def build_fasta_command(
     # Optional redundancy removal
     if redundancy_tool:
         dedup_path = fasta_dir / "combined.dedup.faa"
+        # Preserve the pre-dedup FASTA for reference
+        pre_dedup_path = fasta_dir / "combined.pre_dedup.faa"
+        import shutil
+
+        shutil.copy2(combined_path, pre_dedup_path)
+
+        cluster_members_path = fasta_dir / "cluster_members.tsv"
+
         if redundancy_tool == "cdhit":
             try:
                 subprocess.run(
@@ -185,9 +227,10 @@ def build_fasta_command(
                     text=True,
                 )
                 dedup_path.replace(combined_path)
-                # Clean up cd-hit cluster file
+                # Convert cd-hit .clstr to cluster_members.tsv
                 clstr = Path(str(dedup_path) + ".clstr")
                 if clstr.exists():
+                    _cdhit_clstr_to_tsv(clstr, cluster_members_path)
                     clstr.unlink()
             except FileNotFoundError:
                 raise typer.BadParameter("cd-hit not found on PATH") from None
@@ -207,11 +250,16 @@ def build_fasta_command(
                     capture_output=True,
                     text=True,
                 )
+                # Preserve cluster membership TSV
+                mmseqs_cluster_tsv = Path(str(dedup_path) + "_cluster.tsv")
+                if mmseqs_cluster_tsv.exists():
+                    shutil.copy2(mmseqs_cluster_tsv, cluster_members_path)
                 rep_seqs = Path(str(dedup_path) + "_rep_seq.fasta")
                 if rep_seqs.exists():
                     rep_seqs.replace(combined_path)
-                import shutil
-
+                # Clean up mmseqs intermediates (but cluster_members.tsv is preserved)
+                for f in fasta_dir.glob("combined.dedup*"):
+                    f.unlink(missing_ok=True)
                 shutil.rmtree(tmp_dir, ignore_errors=True)
             except FileNotFoundError:
                 raise typer.BadParameter("mmseqs not found on PATH") from None
