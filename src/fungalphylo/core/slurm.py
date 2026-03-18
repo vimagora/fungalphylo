@@ -28,7 +28,7 @@ def resolve_staging_id(project_dir: Path, explicit: str | None) -> str:
     conn = connect(paths.db_path)
     try:
         row = conn.execute(
-            "SELECT staging_id FROM stagings ORDER BY created_at DESC LIMIT 1"
+            "SELECT staging_id FROM stagings WHERE staging_id != '__family__' ORDER BY created_at DESC LIMIT 1"
         ).fetchone()
     finally:
         conn.close()
