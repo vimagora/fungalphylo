@@ -11,7 +11,7 @@ from fungalphylo.core.ids import now_iso, now_tag
 from fungalphylo.core.manifest import write_manifest
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.core.slurm import infer_account_from_project_dir
-from fungalphylo.core.tools import load_tools
+from fungalphylo.core.tools import bin_dir_export_lines, load_tools
 from fungalphylo.db.db import connect, init_db
 
 
@@ -87,9 +87,10 @@ def tree_command(
 
     if tree_method == "iqtree":
         iqtree_cmd = tools.iqtree.command
+        path_export = bin_dir_export_lines([tools.iqtree.bin_dir])
+        module_lines = "" if tools.iqtree.bin_dir else "module load iqtree\n"
         tree_commands = f"""\
-module load iqtree
-
+{module_lines}{path_export}
 echo "Running IQ-TREE..."
 {iqtree_cmd} \\
   -s "{trimmed_aln.as_posix()}" \\
@@ -101,11 +102,13 @@ echo "Running IQ-TREE..."
 echo "Tree building complete."
 """
     else:  # fasttree
+        fasttree_cmd = tools.fasttree.command
+        path_export = bin_dir_export_lines([tools.fasttree.bin_dir])
+        module_lines = "" if tools.fasttree.bin_dir else "module load fasttree\n"
         tree_commands = f"""\
-module load fasttree
-
+{module_lines}{path_export}
 echo "Running FastTree..."
-FastTree -gamma < "{trimmed_aln.as_posix()}" > "{treefile.as_posix()}"
+{fasttree_cmd} -gamma < "{trimmed_aln.as_posix()}" > "{treefile.as_posix()}"
 
 echo "Tree building complete."
 """

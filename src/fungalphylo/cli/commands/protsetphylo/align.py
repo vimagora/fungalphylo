@@ -11,7 +11,7 @@ from fungalphylo.core.ids import now_iso, now_tag
 from fungalphylo.core.manifest import write_manifest
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.core.slurm import infer_account_from_project_dir
-from fungalphylo.core.tools import load_tools
+from fungalphylo.core.tools import bin_dir_export_lines, load_tools
 from fungalphylo.db.db import connect, init_db
 
 
@@ -83,6 +83,12 @@ def align_command(
     aln_output = alignment_dir / "combined.aln"
     trimmed_output = alignment_dir / "combined.trimmed.aln"
 
+    # Build PATH exports for tools with bin_dir, module loads for those without
+    path_export = bin_dir_export_lines([tools.mafft.bin_dir, tools.trimal.bin_dir])
+    module_lines = ""
+    if not tools.mafft.bin_dir:
+        module_lines += "module load mafft\n"
+
     script = f"""#!/bin/bash
 #SBATCH --account={acct}
 #SBATCH --job-name=align_{family_id}
@@ -95,8 +101,7 @@ def align_command(
 
 set -euo pipefail
 
-module load mafft
-
+{module_lines}{path_export}
 echo "Running MAFFT alignment..."
 {mafft_cmd} --auto --thread $SLURM_CPUS_PER_TASK \\
   "{combined_fasta.as_posix()}" \\
