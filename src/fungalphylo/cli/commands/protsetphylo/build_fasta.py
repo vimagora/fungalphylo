@@ -316,10 +316,12 @@ def build_fasta_command(
                     capture_output=True,
                     text=True,
                 )
-                # Preserve cluster membership TSV
+                # Preserve cluster membership TSV (add header row)
                 mmseqs_cluster_tsv = Path(str(dedup_path) + "_cluster.tsv")
                 if mmseqs_cluster_tsv.exists():
-                    shutil.copy2(mmseqs_cluster_tsv, cluster_members_path)
+                    with cluster_members_path.open("w", encoding="utf-8") as out_f:
+                        out_f.write("representative\tmember\n")
+                        out_f.write(mmseqs_cluster_tsv.read_text(encoding="utf-8"))
                 rep_seqs = Path(str(dedup_path) + "_rep_seq.fasta")
                 if rep_seqs.exists():
                     rep_seqs.replace(combined_path)
