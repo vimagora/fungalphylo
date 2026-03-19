@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import csv
+import shutil
 import subprocess
+from collections import defaultdict
 from pathlib import Path
 
 import typer
@@ -46,6 +48,69 @@ def _cdhit_clstr_to_tsv(clstr_path: Path, out_path: Path) -> None:
         for rep, members in clusters:
             for member in members:
                 f.write(f"{rep}\t{member}\n")
+
+
+def _split_clusters(
+    cluster_members_path: Path,
+    all_records_by_header: dict[str, FastaRecord],
+    characterized_headers: set[str],
+    clusters_dir: Path,
+) -> Path:
+    """Split sequences into per-cluster FASTAs and write a cluster summary.
+
+    Returns the path to the cluster_summary.tsv file.
+    """
+    clusters_dir.mkdir(parents=True, exist_ok=True)
+
+    # Parse cluster_members.tsv into {representative: [members]}
+    rep_to_members: dict[str, list[str]] = defaultdict(list)
+    with cluster_members_path.open("r", encoding="utf-8") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for row in reader:
+            rep_to_members[row["representative"]].append(row["member"])
+
+    summary_rows: list[dict[str, str]] = []
+
+    for idx, (rep, members) in enumerate(
+        sorted(rep_to_members.items(), key=lambda kv: len(kv[1]), reverse=True), start=1
+    ):
+        cluster_id = f"cluster_{idx:04d}"
+        records: list[FastaRecord] = []
+        char_in_cluster: list[str] = []
+
+        for member in members:
+            rec = all_records_by_header.get(member)
+            if rec is not None:
+                records.append(rec)
+                if member in characterized_headers:
+                    char_in_cluster.append(member)
+
+        if records:
+            write_fasta(records, clusters_dir / f"{cluster_id}.faa")
+
+        summary_rows.append({
+            "cluster_id": cluster_id,
+            "representative": rep,
+            "n_members": str(len(members)),
+            "n_sequences_found": str(len(records)),
+            "has_characterized": "yes" if char_in_cluster else "no",
+            "characterized_proteins": ";".join(char_in_cluster),
+        })
+
+    summary_path = clusters_dir / "cluster_summary.tsv"
+    with summary_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "cluster_id", "representative", "n_members",
+                "n_sequences_found", "has_characterized", "characterized_proteins",
+            ],
+            delimiter="\t",
+        )
+        writer.writeheader()
+        writer.writerows(summary_rows)
+
+    return summary_path
 
 
 def _read_characterized_tsv(path: Path) -> list[dict[str, str]]:
@@ -201,12 +266,13 @@ def build_fasta_command(
     write_fasta(all_records, combined_path)
 
     # Optional redundancy removal
+    n_clusters = 0
+    clusters_dir = fasta_dir / "clusters"
+
     if redundancy_tool:
         dedup_path = fasta_dir / "combined.dedup.faa"
         # Preserve the pre-dedup FASTA for reference
         pre_dedup_path = fasta_dir / "combined.pre_dedup.faa"
-        import shutil
-
         shutil.copy2(combined_path, pre_dedup_path)
 
         cluster_members_path = fasta_dir / "cluster_members.tsv"
@@ -264,6 +330,24 @@ def build_fasta_command(
             except FileNotFoundError:
                 raise typer.BadParameter("mmseqs not found on PATH") from None
 
+        # Split clusters into per-cluster FASTAs
+        if cluster_members_path.exists():
+            # Build header lookup from the pre-dedup FASTA (all sequences)
+            all_records_by_header = {r.header: r for r in iter_fasta(pre_dedup_path)}
+            # Collect characterized protein headers
+            char_headers: set[str] = set()
+            for rec in iter_fasta(char_fasta_path):
+                char_headers.add(rec.header)
+
+            if clusters_dir.exists():
+                shutil.rmtree(clusters_dir)
+            summary_path = _split_clusters(
+                cluster_members_path, all_records_by_header, char_headers, clusters_dir,
+            )
+            n_clusters = sum(1 for f in clusters_dir.glob("*.faa"))
+            typer.echo(f"  Cluster FASTAs:     {clusters_dir}")
+            typer.echo(f"  Cluster summary:    {summary_path}")
+
     n_combined = sum(1 for _ in iter_fasta(combined_path))
 
     # Update manifest
@@ -274,6 +358,8 @@ def build_fasta_command(
         "redundancy_tool": redundancy_tool,
         "identity_threshold": identity_threshold if redundancy_tool else None,
         "combined_fasta": str(combined_path.relative_to(project_dir)),
+        "n_clusters": n_clusters if redundancy_tool else None,
+        "clusters_dir": str(clusters_dir.relative_to(project_dir)) if n_clusters else None,
     }
     write_manifest(manifest_path, manifest)
 
@@ -285,9 +371,12 @@ def build_fasta_command(
             "family_id": family_id,
             "n_combined": n_combined,
             "redundancy_tool": redundancy_tool,
+            "n_clusters": n_clusters,
         },
     )
 
     typer.echo(f"Built FASTA for family: {family_id}")
     typer.echo(f"  Combined sequences: {n_combined}")
+    if n_clusters:
+        typer.echo(f"  Total clusters:     {n_clusters}")
     typer.echo(f"  Output:             {combined_path}")

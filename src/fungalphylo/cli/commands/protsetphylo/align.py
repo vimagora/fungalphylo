@@ -21,6 +21,11 @@ def align_command(
     account: str | None = typer.Option(None, "--account", help="SLURM account"),
     no_confirm: bool = typer.Option(False, "--no-confirm", help="Skip account confirmation"),
     run_id: str | None = typer.Option(None, "--run-id", help="Run identifier"),
+    mafft_retree: int = typer.Option(2, "--mafft-retree", help="MAFFT --retree guide tree rebuilds"),
+    mafft_maxiterate: int = typer.Option(2, "--mafft-maxiterate", help="MAFFT --maxiterate refinement cycles"),
+    trimal_gt: float = typer.Option(0.8, "--trimal-gt", help="trimAl gap threshold (fraction of sequences required)"),
+    trimal_cons: float = typer.Option(10.0, "--trimal-cons", help="trimAl minimum conservation percentage"),
+    input_fasta: str | None = typer.Option(None, "--input-fasta", help="Override input FASTA path (e.g. a cluster FASTA)"),
     partition: str = typer.Option("small", "--partition", help="SLURM partition"),
     time: str = typer.Option("12:00:00", "--time", help="SLURM time limit"),
     cpus: int = typer.Option(8, "--cpus", help="CPUs per task"),
@@ -45,14 +50,19 @@ def align_command(
     if family_row is None:
         raise typer.BadParameter(f"Family not found: {family_id!r}")
 
-    # Verify combined FASTA exists
+    # Resolve input FASTA
     fasta_dir = paths.family_fasta_dir(family_id)
-    combined_fasta = fasta_dir / "combined.faa"
-    if not combined_fasta.exists():
-        raise typer.BadParameter(
-            f"Combined FASTA not found: {combined_fasta}\n"
-            "Run `protsetphylo build-fasta` first."
-        )
+    if input_fasta:
+        combined_fasta = Path(input_fasta).expanduser().resolve()
+        if not combined_fasta.exists():
+            raise typer.BadParameter(f"Input FASTA not found: {combined_fasta}")
+    else:
+        combined_fasta = fasta_dir / "combined.faa"
+        if not combined_fasta.exists():
+            raise typer.BadParameter(
+                f"Combined FASTA not found: {combined_fasta}\n"
+                "Run `protsetphylo build-fasta` first."
+            )
 
     # Resolve account
     acct = account or infer_account_from_project_dir(project_dir)
@@ -103,7 +113,7 @@ set -euo pipefail
 
 {module_lines}{path_export}
 echo "Running MAFFT alignment..."
-{mafft_cmd} --auto --thread $SLURM_CPUS_PER_TASK \\
+{mafft_cmd} --retree {mafft_retree} --maxiterate {mafft_maxiterate} --thread $SLURM_CPUS_PER_TASK \\
   "{combined_fasta.as_posix()}" \\
   > "{aln_output.as_posix()}"
 
@@ -111,7 +121,7 @@ echo "Running trimAl..."
 {trimal_cmd} \\
   -in "{aln_output.as_posix()}" \\
   -out "{trimmed_output.as_posix()}" \\
-  -automated1
+  -gt {trimal_gt} -cons {trimal_cons}
 
 echo "Alignment complete."
 """
@@ -138,6 +148,14 @@ echo "Alignment complete."
         "tools": {
             "mafft": mafft_cmd,
             "trimal": trimal_cmd,
+        },
+        "mafft": {
+            "retree": mafft_retree,
+            "maxiterate": mafft_maxiterate,
+        },
+        "trimal": {
+            "gt": trimal_gt,
+            "cons": trimal_cons,
         },
         "slurm": {
             "account": acct,

@@ -24,6 +24,7 @@ def tree_command(
     tree_method: str = typer.Option("iqtree", "--tree-method", help="Tree method: iqtree or fasttree"),
     model: str = typer.Option("MFP", "--model", help="Substitution model (IQ-TREE)"),
     bootstrap: int = typer.Option(1000, "--bootstrap", help="Bootstrap replicates (IQ-TREE -bb)"),
+    input_alignment: str | None = typer.Option(None, "--input-alignment", help="Override input alignment path"),
     partition: str = typer.Option("small", "--partition", help="SLURM partition"),
     time: str = typer.Option("24:00:00", "--time", help="SLURM time limit"),
     cpus: int = typer.Option(8, "--cpus", help="CPUs per task"),
@@ -51,14 +52,19 @@ def tree_command(
     if family_row is None:
         raise typer.BadParameter(f"Family not found: {family_id!r}")
 
-    # Verify trimmed alignment exists
+    # Resolve input alignment
     alignment_dir = paths.family_alignment_dir(family_id)
-    trimmed_aln = alignment_dir / "combined.trimmed.aln"
-    if not trimmed_aln.exists():
-        raise typer.BadParameter(
-            f"Trimmed alignment not found: {trimmed_aln}\n"
-            "Run `protsetphylo align` first."
-        )
+    if input_alignment:
+        trimmed_aln = Path(input_alignment).expanduser().resolve()
+        if not trimmed_aln.exists():
+            raise typer.BadParameter(f"Input alignment not found: {trimmed_aln}")
+    else:
+        trimmed_aln = alignment_dir / "combined.trimmed.aln"
+        if not trimmed_aln.exists():
+            raise typer.BadParameter(
+                f"Trimmed alignment not found: {trimmed_aln}\n"
+                "Run `protsetphylo align` first."
+            )
 
     # Resolve account
     acct = account or infer_account_from_project_dir(project_dir)
