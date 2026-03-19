@@ -28,6 +28,12 @@ def strip_trailing_stop_aa(seq: str) -> str:
     return seq.rstrip("*")
 
 
+def has_internal_stop(seq: str) -> bool:
+    """Check if a sequence has internal stop codons (asterisks not at the end)."""
+    stripped = seq.rstrip("*")
+    return "*" in stripped
+
+
 def resolve_default_idmap(project_dir: Path, cfg: dict, explicit: Path | None) -> Path | None:
     if explicit is not None:
         return explicit.expanduser().resolve()
@@ -94,6 +100,7 @@ def stage_proteome_jgi(
     portal_id: str,
     min_len: int,
     max_len: int,
+    internal_stop: str = "drop",
     map_writer: csv.writer,
 ) -> tuple[dict, dict]:
     stats = defaultdict(int)
@@ -107,6 +114,16 @@ def stage_proteome_jgi(
             stats["portal_mismatch"] += 1
 
         seq = strip_trailing_stop_aa(rec.sequence)
+
+        if has_internal_stop(seq):
+            stats["internal_stop"] += 1
+            if internal_stop == "drop":
+                stats["dropped_internal_stop"] += 1
+                continue
+            elif internal_stop == "strip":
+                seq = seq.replace("*", "")
+            # "warn" — keep as-is, just counted above
+
         length = len(seq)
         if length < min_len:
             stats["dropped_too_short"] += 1
@@ -167,6 +184,7 @@ def stage_proteome_non_jgi(
     portal_id: str,
     min_len: int,
     max_len: int,
+    internal_stop: str = "drop",
     idmap: PortalIdMap,
     map_writer: csv.writer,
 ) -> tuple[dict, dict]:
@@ -186,6 +204,16 @@ def stage_proteome_non_jgi(
             continue
 
         seq = strip_trailing_stop_aa(rec.sequence)
+
+        if has_internal_stop(seq):
+            stats["internal_stop"] += 1
+            if internal_stop == "drop":
+                stats["dropped_internal_stop"] += 1
+                continue
+            elif internal_stop == "strip":
+                seq = seq.replace("*", "")
+            # "warn" — keep as-is, just counted above
+
         length = len(seq)
         if length < min_len:
             stats["dropped_too_short"] += 1

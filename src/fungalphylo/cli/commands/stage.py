@@ -55,6 +55,7 @@ def stage_command(
     probe_n: int = typer.Option(25, "--probe-n", help="Headers to probe when detecting JGI header mode."),
     id_map: Path | None = typer.Option(None, "--id-map", help="Mapping for non-JGI portals (dir or TSV)."),
     id_map_cds: Path | None = typer.Option(None, "--id-map-cds", help="Optional CDS mapping for non-JGI portals."),
+    internal_stop: str = typer.Option("drop", "--internal-stop", help="Internal stop codon handling: drop (default), warn (keep + count), strip (remove * and keep)."),
     overwrite: bool = typer.Option(False, "--overwrite", help="Force regeneration instead of reusing equivalent artifacts."),
     continue_on_error: bool = typer.Option(True, "--continue-on-error/--fail-fast", help="Continue after portal errors."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preflight only (no writes)."),
@@ -63,6 +64,9 @@ def stage_command(
         return
     if project_dir is None:
         raise typer.BadParameter("PROJECT_DIR is required.")
+
+    if internal_stop not in ("drop", "warn", "strip"):
+        raise typer.BadParameter(f"--internal-stop must be drop, warn, or strip. Got: {internal_stop!r}")
 
     project_dir = project_dir.expanduser().resolve()
     paths = ProjectPaths(project_dir)
@@ -154,13 +158,14 @@ def stage_command(
                         prot_idmap_sha256 = sha256_file(prot_idmap_path)
 
                     prot_cache_payload = {
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "kind": "proteome",
                         "portal_id": pid,
                         "source_file_id": prot_file_id,
                         "raw_sha256": prot_raw_sha256,
                         "min_aa": min_len,
                         "max_aa": max_len,
+                        "internal_stop": internal_stop,
                         "probe_n": probe_n,
                         "header_mode": prot_mode,
                         "id_map_sha256": prot_idmap_sha256,
@@ -207,6 +212,7 @@ def stage_command(
                                     portal_id=pid,
                                     min_len=min_len,
                                     max_len=max_len,
+                                    internal_stop=internal_stop,
                                     map_writer=mw,
                                 )
                             else:
@@ -217,6 +223,7 @@ def stage_command(
                                     portal_id=pid,
                                     min_len=min_len,
                                     max_len=max_len,
+                                    internal_stop=internal_stop,
                                     idmap=pmap,
                                     map_writer=mw,
                                 )
@@ -230,6 +237,18 @@ def stage_command(
                                             "reason": f"dropped_missing_in_idmap={missing}",
                                         }
                                     )
+
+                            n_internal_stop = prot_stats.get("internal_stop", 0)
+                            if n_internal_stop:
+                                action = "dropped" if internal_stop == "drop" else internal_stop
+                                actions.append(
+                                    {
+                                        "portal_id": pid,
+                                        "kind": "proteome",
+                                        "action": "warn",
+                                        "reason": f"internal_stop_codons={n_internal_stop} ({action})",
+                                    }
+                                )
 
                     prot_artifact_sha256 = sha256_file(out_prot)
                     insert_staging_file(
