@@ -162,27 +162,35 @@ def test_select_finds_matching_proteins(tmp_path: Path) -> None:
         ],
     )
     assert result.exit_code == 0, result.output
-    assert "Proteins selected: 2" in result.output
+    # 2 from IPR selection + 1 characterized appended (Portal1) + 1 standalone (Ambmo)
+    assert "Proteins selected:          4" in result.output
 
     # Verify selected FASTAs exist
     selected_dir = paths.family_selected_dir("mfs_sugar")
     assert (selected_dir / "Portal1.faa").exists()
     assert (selected_dir / "Portal2.faa").exists()
+    assert (selected_dir / "Ambmo.faa").exists()  # standalone characterized
 
-    # Check content
+    # Check Portal1 content: selected prot_A + appended characterized Sp1|LAT1
     portal1_records = list(iter_fasta(selected_dir / "Portal1.faa"))
-    assert len(portal1_records) == 1
-    assert portal1_records[0].header == "Portal1|prot_A"
+    assert len(portal1_records) == 2
+    portal1_headers = {r.header for r in portal1_records}
+    assert "Portal1|prot_A" in portal1_headers
+    assert "Sp1|LAT1" in portal1_headers
 
     portal2_records = list(iter_fasta(selected_dir / "Portal2.faa"))
     assert len(portal2_records) == 1
+
+    # Check standalone
+    ambmo_records = list(iter_fasta(selected_dir / "Ambmo.faa"))
+    assert len(ambmo_records) == 1
+    assert ambmo_records[0].header == "Ambmo|STP1"
 
     # Verify report
     report_path = selected_dir / "selection_report.tsv"
     assert report_path.exists()
     with report_path.open("r", encoding="utf-8", newline="") as f:
         rows = list(csv.DictReader(f, delimiter="\t"))
-    assert len(rows) == 2
     assert all(r["selected"] == "yes" for r in rows)
 
 
@@ -215,8 +223,8 @@ def test_select_strict_arch_mode_excludes_mismatches(tmp_path: Path) -> None:
         ],
     )
     assert result.exit_code == 0, result.output
-    # Both proteins have (PF00083,) arch which matches characterized
-    assert "Proteins selected: 2" in result.output
+    # 2 from IPR + 1 characterized appended (Portal1) + 1 standalone (Ambmo)
+    assert "Proteins selected:          4" in result.output
 
 
 def test_select_evalue_threshold_filters(tmp_path: Path) -> None:
@@ -248,8 +256,8 @@ def test_select_evalue_threshold_filters(tmp_path: Path) -> None:
         ],
     )
     assert result.exit_code == 0, result.output
-    # Only prot_A should pass (1e-40 <= 1e-20 threshold)
-    assert "Proteins selected: 1" in result.output
+    # 1 from IPR (prot_A passes, prot_B fails) + 1 characterized appended (Portal1) + 1 standalone (Ambmo)
+    assert "Proteins selected:          3" in result.output
 
 
 def test_select_requires_characterized_ipr(tmp_path: Path) -> None:

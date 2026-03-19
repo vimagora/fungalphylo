@@ -68,6 +68,13 @@ class FasttreeTool:
 
 
 @dataclass(frozen=True)
+class BlastTool:
+    bin_dir: Path | None = None
+    makeblastdb_cmd: str = "makeblastdb"
+    blastp_cmd: str = "blastp"
+
+
+@dataclass(frozen=True)
 class ToolsConfig:
     busco: BuscoTool
     interproscan: InterProScanTool
@@ -75,6 +82,7 @@ class ToolsConfig:
     trimal: TrimalTool = TrimalTool()
     iqtree: IqtreeTool = IqtreeTool()
     fasttree: FasttreeTool = FasttreeTool()
+    blast: BlastTool = BlastTool()
 
 
 def load_tools(project_dir: Path) -> ToolsConfig:
@@ -124,6 +132,12 @@ def load_tools(project_dir: Path) -> ToolsConfig:
     fasttree_bin_dir_raw = (fasttree_data.get("bin_dir") or "").strip()
     fasttree_bin_dir = Path(fasttree_bin_dir_raw).expanduser().resolve() if fasttree_bin_dir_raw else None
 
+    blast_data = data.get("blast") or {}
+    blast_bin_dir_raw = (blast_data.get("bin_dir") or "").strip()
+    blast_bin_dir = Path(blast_bin_dir_raw).expanduser().resolve() if blast_bin_dir_raw else None
+    makeblastdb_cmd = (blast_data.get("makeblastdb_cmd") or "makeblastdb").strip() or "makeblastdb"
+    blastp_cmd = (blast_data.get("blastp_cmd") or "blastp").strip() or "blastp"
+
     return ToolsConfig(
         busco=BuscoTool(bin_dir=bin_dir, command=cmd),
         interproscan=InterProScanTool(bin_dir=ipr_bin_dir, command=ipr_cmd),
@@ -131,6 +145,7 @@ def load_tools(project_dir: Path) -> ToolsConfig:
         trimal=TrimalTool(bin_dir=trimal_bin_dir, command=trimal_cmd),
         iqtree=IqtreeTool(bin_dir=iqtree_bin_dir, command=iqtree_cmd),
         fasttree=FasttreeTool(bin_dir=fasttree_bin_dir, command=fasttree_cmd),
+        blast=BlastTool(bin_dir=blast_bin_dir, makeblastdb_cmd=makeblastdb_cmd, blastp_cmd=blastp_cmd),
     )
 
 

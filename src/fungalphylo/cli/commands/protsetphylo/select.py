@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import json
+import subprocess
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -15,6 +17,7 @@ from fungalphylo.core.ipr_tsv import IprHit, filter_by_accessions, parse_ipr_tsv
 from fungalphylo.core.manifest import read_manifest, write_manifest
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.core.slurm import resolve_staging_id
+from fungalphylo.core.tools import load_tools
 from fungalphylo.db.db import connect, init_db
 
 
@@ -73,6 +76,76 @@ def _collect_portal_ipr_hits(
     return portal_hits
 
 
+def _sanitize_header_part(text: str) -> str:
+    import re
+
+    return re.sub(r"\s+", "_", text.strip()).strip("_")
+
+
+def _check_blast_available(makeblastdb_cmd: str) -> bool:
+    """Check if BLAST is available on PATH."""
+    try:
+        subprocess.run(
+            [makeblastdb_cmd, "-version"],
+            capture_output=True,
+            text=True,
+        )
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _blast_characterized_against_portal(
+    char_rec: FastaRecord,
+    portal_fasta: Path,
+    makeblastdb_cmd: str,
+    blastp_cmd: str,
+    evalue: float,
+) -> str | None:
+    """BLAST a characterized protein against a portal FASTA.
+
+    Returns the best-hit header from the portal FASTA, or None if no hit.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        query_path = tmp_path / "query.faa"
+        db_prefix = tmp_path / "db"
+
+        # Write query FASTA
+        query_path.write_text(f">{char_rec.header}\n{char_rec.sequence}\n", encoding="utf-8")
+
+        # Build BLAST database
+        subprocess.run(
+            [makeblastdb_cmd, "-in", str(portal_fasta), "-dbtype", "prot", "-out", str(db_prefix)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        # Run blastp
+        result = subprocess.run(
+            [
+                blastp_cmd,
+                "-query", str(query_path),
+                "-db", str(db_prefix),
+                "-outfmt", "6 sseqid evalue bitscore",
+                "-evalue", str(evalue),
+                "-max_target_seqs", "1",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        # Parse top hit
+        for line in result.stdout.strip().splitlines():
+            parts = line.split("\t")
+            if parts:
+                return parts[0]  # best hit subject header
+
+    return None
+
+
 def select_command(
     project_dir: Path = typer.Argument(..., help="Project directory"),
     family_id: str = typer.Option(..., "--family-id", help="Family to select proteins for"),
@@ -87,15 +160,25 @@ def select_command(
         "--arch-mode",
         help="Domain architecture filtering: strict|flag|off",
     ),
+    blast_evalue: float = typer.Option(
+        10.0, "--blast-evalue", help="E-value cutoff for BLAST integration of characterized proteins"
+    ),
 ) -> None:
     """Select matching proteins from project proteomes for a gene family."""
     project_dir = project_dir.expanduser().resolve()
     paths = ProjectPaths(project_dir)
     ensure_project_dirs(paths)
     init_db(paths.db_path)
+    tools = load_tools(project_dir)
 
     if arch_mode not in ("strict", "flag", "off"):
         raise typer.BadParameter(f"--arch-mode must be strict, flag, or off. Got: {arch_mode!r}")
+
+    # Resolve BLAST commands (prepend bin_dir if set)
+    blast_bin = tools.blast.bin_dir
+    makeblastdb_cmd = str(blast_bin / tools.blast.makeblastdb_cmd) if blast_bin else tools.blast.makeblastdb_cmd
+    blastp_cmd = str(blast_bin / tools.blast.blastp_cmd) if blast_bin else tools.blast.blastp_cmd
+    blast_available = _check_blast_available(makeblastdb_cmd)
 
     # Verify family exists
     conn = connect(paths.db_path)
@@ -110,8 +193,12 @@ def select_command(
 
     target_pfams = set(json.loads(family_row["pfams"]))
 
-    # Load characterized IPR results for thresholds
-    char_ipr_dir = paths.family_characterized_dir(family_id) / "interproscan"
+    # Load characterized data
+    char_dir = paths.family_characterized_dir(family_id)
+    char_tsv_path = char_dir / "characterized.tsv"
+    char_fasta_path = char_dir / "characterized.faa"
+
+    char_ipr_dir = char_dir / "interproscan"
     char_ipr_tsv = char_ipr_dir / "characterized.tsv"
     if not char_ipr_tsv.exists():
         raise typer.BadParameter(
@@ -125,6 +212,32 @@ def select_command(
     char_archs = build_domain_architectures(char_hits, target_pfams)
     allowed_archs = set(char_archs.values()) if arch_mode != "off" else set()
 
+    # Parse characterized TSV to build portal and standalone lookups
+    char_rows: list[dict[str, str]] = []
+    with char_tsv_path.open("r", encoding="utf-8", newline="") as f:
+        char_rows = list(csv.DictReader(f, delimiter="\t"))
+
+    char_records = list(iter_fasta(char_fasta_path))
+    char_by_header: dict[str, FastaRecord] = {r.header: r for r in char_records}
+
+    # Group characterized proteins: {portal_id: [(header, record, row)]} and standalone
+    portal_char: dict[str, list[tuple[str, FastaRecord, dict[str, str]]]] = defaultdict(list)
+    standalone_char: dict[str, list[FastaRecord]] = defaultdict(list)  # keyed by short_name
+
+    for row in char_rows:
+        short_name = _sanitize_header_part(row["short_name"])
+        protein_name = _sanitize_header_part(row["protein_name"])
+        header = f"{short_name}|{protein_name}"
+        char_rec = char_by_header.get(header)
+        if char_rec is None:
+            continue
+
+        portal_id = row.get("portal_id", "").strip()
+        if portal_id:
+            portal_char[portal_id].append((header, char_rec, row))
+        else:
+            standalone_char[short_name].append(char_rec)
+
     # Find project IPR results
     ipr_run_id, results_root = _find_project_ipr_run(paths, project_ipr_run_id)
 
@@ -137,6 +250,14 @@ def select_command(
     # Collect portal hits
     portal_hits = _collect_portal_ipr_hits(results_root, target_pfams)
 
+    # Warn if BLAST not available but characterized proteins need integration
+    if not blast_available and portal_char:
+        typer.echo(
+            "WARNING: BLAST not found on PATH. Characterized proteins with portal_id "
+            "will be appended without replacing best hits. Load BLAST for proper integration "
+            "(e.g. module load blast)."
+        )
+
     # Select proteins per portal
     selected_dir = paths.family_selected_dir(family_id)
     selected_dir.mkdir(parents=True, exist_ok=True)
@@ -144,6 +265,8 @@ def select_command(
     report_rows: list[dict[str, str]] = []
     total_selected = 0
     portals_with_hits = 0
+    char_integrated = 0
+    char_appended = 0
 
     for portal_id, hits in sorted(portal_hits.items()):
         # Filter by e-value thresholds
@@ -209,11 +332,80 @@ def select_command(
             if pid in protein_id_set:
                 selected_records.append(rec)
 
-        if selected_records:
-            out_fasta = selected_dir / f"{portal_id}.faa"
-            write_fasta(selected_records, out_fasta)
-            total_selected += len(selected_records)
-            portals_with_hits += 1
+        if not selected_records:
+            continue
+
+        # Integrate characterized proteins for this portal via BLAST
+        if portal_id in portal_char:
+            if blast_available:
+                out_fasta_tmp = selected_dir / f"{portal_id}.faa"
+                write_fasta(selected_records, out_fasta_tmp)
+
+                for _header, char_rec, _row in portal_char[portal_id]:
+                    best_hit = _blast_characterized_against_portal(
+                        char_rec, out_fasta_tmp, makeblastdb_cmd, blastp_cmd, blast_evalue,
+                    )
+                    if best_hit:
+                        # Replace best hit with characterized protein
+                        selected_records = [
+                            char_rec if r.header == best_hit else r
+                            for r in selected_records
+                        ]
+                        char_integrated += 1
+                        report_rows.append({
+                            "portal_id": portal_id,
+                            "protein_id": char_rec.header,
+                            "architecture": "",
+                            "arch_match": "",
+                            "selected": "yes",
+                            "reason": f"characterized_replaced:{best_hit}",
+                        })
+                    else:
+                        # No hit — append
+                        selected_records.append(char_rec)
+                        char_appended += 1
+                        report_rows.append({
+                            "portal_id": portal_id,
+                            "protein_id": char_rec.header,
+                            "architecture": "",
+                            "arch_match": "",
+                            "selected": "yes",
+                            "reason": "characterized_appended",
+                        })
+            else:
+                # BLAST not available — append characterized proteins directly
+                for _header, char_rec, _row in portal_char[portal_id]:
+                    selected_records.append(char_rec)
+                    char_appended += 1
+                    report_rows.append({
+                        "portal_id": portal_id,
+                        "protein_id": char_rec.header,
+                        "architecture": "",
+                        "arch_match": "",
+                        "selected": "yes",
+                        "reason": "characterized_appended_no_blast",
+                    })
+
+        out_fasta = selected_dir / f"{portal_id}.faa"
+        write_fasta(selected_records, out_fasta)
+        total_selected += len(selected_records)
+        portals_with_hits += 1
+
+    # Write standalone characterized proteins (no portal_id), grouped by short_name
+    for short_name, char_recs in sorted(standalone_char.items()):
+        out_fasta = selected_dir / f"{short_name}.faa"
+        write_fasta(char_recs, out_fasta)
+        total_selected += len(char_recs)
+        portals_with_hits += 1
+        for rec in char_recs:
+            report_rows.append({
+                "portal_id": short_name,
+                "protein_id": rec.header,
+                "architecture": "",
+                "arch_match": "",
+                "selected": "yes",
+                "reason": "characterized_standalone",
+            })
 
     # Write selection report
     report_path = selected_dir / "selection_report.tsv"
@@ -234,9 +426,13 @@ def select_command(
         "project_ipr_run_id": ipr_run_id,
         "staging_id": selected_staging_id,
         "arch_mode": arch_mode,
+        "blast_evalue": blast_evalue,
         "evalue_thresholds": {k: v for k, v in evalue_thresholds.items()},
         "n_portals_with_hits": portals_with_hits,
         "n_selected_proteins": total_selected,
+        "n_characterized_replaced": char_integrated,
+        "n_characterized_appended": char_appended,
+        "n_characterized_standalone": sum(len(v) for v in standalone_char.values()),
     }
     write_manifest(manifest_path, manifest)
 
@@ -260,13 +456,19 @@ def select_command(
             "project_ipr_run_id": ipr_run_id,
             "staging_id": selected_staging_id,
             "arch_mode": arch_mode,
+            "blast_evalue": blast_evalue,
             "n_portals_with_hits": portals_with_hits,
             "n_selected_proteins": total_selected,
+            "n_characterized_replaced": char_integrated,
+            "n_characterized_appended": char_appended,
         },
     )
 
     typer.echo(f"Selection complete for family: {family_id}")
-    typer.echo(f"  Portals with hits: {portals_with_hits}")
-    typer.echo(f"  Proteins selected: {total_selected}")
-    typer.echo(f"  Arch mode:         {arch_mode}")
-    typer.echo(f"  Output:            {selected_dir}")
+    typer.echo(f"  Portals with hits:          {portals_with_hits}")
+    typer.echo(f"  Proteins selected:          {total_selected}")
+    typer.echo(f"  Characterized replaced:     {char_integrated}")
+    typer.echo(f"  Characterized appended:     {char_appended}")
+    typer.echo(f"  Characterized standalone:   {sum(len(v) for v in standalone_char.values())}")
+    typer.echo(f"  Arch mode:                  {arch_mode}")
+    typer.echo(f"  Output:                     {selected_dir}")

@@ -203,8 +203,13 @@ Analyze specific gene families (e.g., MFS sugar transporters) across your staged
 ### Pipeline
 
 ```
-protsetphylo init → interproscan → select → build-fasta → align → tree
+protsetphylo init → interproscan → select → [OrthoFinder] → align → tree
+                                      ↓
+                              (optional quick path)
+                          build-fasta → MMseqs2/CD-HIT → align → tree
 ```
+
+The recommended (publication-quality) path uses OrthoFinder on the per-species FASTAs produced by `select`. The optional quick path uses `build-fasta` with MMseqs2/CD-HIT clustering for fast exploratory analysis.
 
 ### Step-by-step
 
@@ -221,7 +226,8 @@ fungalphylo protsetphylo init /path/to/project \
 
 The characterized TSV must have columns: `portal_id`, `species`, `short_name`, `protein_name`, `sequence`. Optional: `protein_id`, `group_*`, `references`.
 
-- `portal_id` can be blank for proteins not in your project (e.g., outgroup sequences)
+- `portal_id` can be blank for proteins not in your project (e.g., outgroup sequences from other species)
+- `portal_id` set: the characterized protein will be BLASTed against that portal's selected proteins during `select` and will replace the best hit (or be appended if no hit)
 - Multiple `--pfam` flags or `--pfam-list pfams.txt` for multi-domain families
 
 Creates `families/<family_id>/` with preserved TSV, generated FASTA, and Pfam config.
@@ -240,6 +246,7 @@ Generates a SLURM script to run InterProScan on the characterized FASTA. Results
 #### 3. Select matching proteins from project proteomes
 
 ```bash
+module load blast
 fungalphylo protsetphylo select /path/to/project \
   --family-id mfs_sugar \
   --arch-mode flag
@@ -252,21 +259,47 @@ Selection logic:
 - `--arch-mode flag` (default): include all, annotate match status in report
 - `--arch-mode off`: skip architecture check
 
-Outputs per-portal FASTAs and `selection_report.tsv` in `families/<family_id>/selected/`.
+Characterized protein integration (requires BLAST on PATH):
+- **With `portal_id`**: BLASTs the characterized protein against that portal's selected proteins. Best hit is replaced with the characterized sequence (header + sequence). If no hit, the characterized protein is appended.
+- **Without `portal_id`**: Written as a standalone FASTA grouped by `short_name` (e.g., outgroup species)
+- `--blast-evalue` controls the BLAST cutoff (default: 10.0)
+- If BLAST is not available, characterized proteins are appended with a warning
 
-#### 4. Build merged FASTA
+Output: per-species FASTAs in `families/<family_id>/selected/` plus `selection_report.tsv`. This directory is ready to be used as input for OrthoFinder.
+
+#### 4a. Recommended: OrthoFinder (publication-quality)
+
+Run OrthoFinder on the `selected/` directory to identify orthogroups via MCL clustering:
 
 ```bash
-fungalphylo protsetphylo build-fasta /path/to/project \
-  --family-id mfs_sugar
+orthofinder -f /path/to/project/families/mfs_sugar/selected/
 ```
 
-Merges characterized and selected proteins:
-- Characterized proteins with `portal_id` + `protein_id` replace their selected counterparts
-- Characterized without `portal_id` are included as standalone sequences
-- Optional `--redundancy-tool cdhit|mmseqs2 --identity-threshold 0.95`
+Then inspect the orthogroups, pick those of interest (especially ones containing characterized proteins), and align + tree each one.
 
-Outputs `families/<family_id>/fasta/combined.faa` plus per-portal FASTAs.
+#### 4b. Optional: Quick clustering with `build-fasta`
+
+For fast exploratory analysis without OrthoFinder:
+
+```bash
+# Merge all selected into one FASTA (no clustering)
+fungalphylo protsetphylo build-fasta /path/to/project \
+  --family-id mfs_sugar
+
+# Or with MMseqs2/CD-HIT clustering for subfamily splitting
+module load mmseqs2
+fungalphylo protsetphylo build-fasta /path/to/project \
+  --family-id mfs_sugar \
+  --redundancy-tool mmseqs2 \
+  --identity-threshold 0.3
+```
+
+When using a redundancy tool, outputs include:
+- `fasta/combined.faa` — representative sequences
+- `fasta/combined.pre_dedup.faa` — all sequences before clustering
+- `fasta/cluster_members.tsv` — cluster membership (representative → member)
+- `fasta/clusters/` — per-cluster FASTAs
+- `fasta/clusters/cluster_summary.tsv` — cluster sizes with `has_characterized` flag
 
 #### 5. Align
 
@@ -277,18 +310,29 @@ fungalphylo protsetphylo align /path/to/project \
   --submit
 ```
 
-Generates a SLURM script that runs MAFFT (`--auto`) then trimAl (`-automated1`). Outputs in `families/<family_id>/alignment/`.
+Generates a SLURM script that runs MAFFT then trimAl. Configurable parameters:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--mafft-retree` | 2 | Guide tree rebuilds |
+| `--mafft-maxiterate` | 2 | Iterative refinement cycles (use 1000 for small sets) |
+| `--trimal-gt` | 0.8 | Gap threshold (fraction of sequences required) |
+| `--trimal-cons` | 10.0 | Minimum conservation percentage |
+| `--input-fasta` | | Override input (e.g., a cluster FASTA) |
+
+Outputs in `families/<family_id>/alignment/`.
 
 #### 6. Build phylogenetic tree
 
 ```bash
+# IQ-TREE (refined, slower)
 fungalphylo protsetphylo tree /path/to/project \
   --family-id mfs_sugar \
   --tree-method iqtree \
   --account project_xxx \
   --submit
 
-# Or with FastTree
+# FastTree (exploratory, fast)
 fungalphylo protsetphylo tree /path/to/project \
   --family-id mfs_sugar \
   --tree-method fasttree \
@@ -296,7 +340,7 @@ fungalphylo protsetphylo tree /path/to/project \
   --submit
 ```
 
-IQ-TREE defaults: `-m MFP -bb 1000 -nt AUTO`. Override with `--model` and `--bootstrap`. Output in `families/<family_id>/tree/`.
+IQ-TREE defaults: `-m MFP -bb 1000 -nt AUTO`. Override with `--model` and `--bootstrap`. Use `--input-alignment` to point at a specific alignment (e.g., per-cluster). Output in `families/<family_id>/tree/`.
 
 ### Family directory structure
 
@@ -309,11 +353,15 @@ families/<family_id>/
   config/
     pfams.txt                  # Target Pfam accessions
   selected/
-    <portal_id>.faa            # Selected proteins per portal
+    <portal_id>.faa            # Per-species FASTAs (OrthoFinder input)
+    <short_name>.faa           # Standalone characterized species
     selection_report.tsv       # What was selected and why
-  fasta/
-    <portal_id>.faa            # Merged per-portal
-    combined.faa               # All sequences for alignment
+  fasta/                       # Only if using build-fasta quick path
+    combined.faa               # Merged/clustered sequences
+    combined.pre_dedup.faa     # Pre-dedup backup (if clustering)
+    cluster_members.tsv        # Cluster membership (if clustering)
+    clusters/                  # Per-cluster FASTAs (if clustering)
+      cluster_summary.tsv      # Cluster sizes + characterized flags
   alignment/
     combined.aln               # MAFFT output
     combined.trimmed.aln       # trimAl output
@@ -347,20 +395,30 @@ External tools are configured in `tools.yaml`:
 
 ```yaml
 busco:
-  bin_dir: "/path/to/busco/bin"  # optional
+  bin_dir: "/path/to/busco/bin"   # optional
   command: "busco"
 interproscan:
-  bin_dir: ""                     # optional, modules loaded in job
+  bin_dir: ""                      # optional, modules loaded in job
   command: "cluster_interproscan"
 mafft:
-  command: "mafft"                # module loaded in job
+  bin_dir: ""                      # optional, module loaded in job
+  command: "mafft"
 trimal:
+  bin_dir: "/path/to/trimal/bin"   # set if not in PATH/module
   command: "trimal"
 iqtree:
-  command: "iqtree2"              # module loaded in job
+  bin_dir: "/path/to/iqtree/bin"   # set if not in PATH/module
+  command: "iqtree3"
+fasttree:
+  bin_dir: "/path/to/fasttree/bin" # set if not in PATH/module
+  command: "fasttree"
+blast:
+  bin_dir: ""                      # optional, module loaded before select
+  makeblastdb_cmd: "makeblastdb"
+  blastp_cmd: "blastp"
 ```
 
-On Puhti, most tools are available via `module load` (handled in generated SLURM scripts).
+When `bin_dir` is set, generated SLURM scripts add `export PATH="<bin_dir>:$PATH"`. When empty, scripts use `module load <tool>` instead. On Puhti, most tools are available via `module load` (e.g., `module load blast` before running `protsetphylo select`).
 
 ---
 
