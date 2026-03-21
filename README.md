@@ -152,6 +152,29 @@ Outputs:
 
 Each run creates a new `staging_id`. Equivalent artifacts are reused by cache key.
 
+#### Internal stop codons
+
+Sequences with internal stop codons (asterisks not at the end) are handled by `--internal-stop`:
+
+| Mode | Behavior |
+|------|----------|
+| `drop` (default) | Remove the sequence entirely |
+| `warn` | Keep the sequence, count in stats |
+| `strip` | Remove internal `*` characters, keep the sequence |
+
+```bash
+# Default: drop sequences with internal stops
+fungalphylo stage /path/to/project
+
+# Keep sequences but log warnings
+fungalphylo stage /path/to/project --internal-stop warn
+
+# Strip internal stop codons
+fungalphylo stage /path/to/project --internal-stop strip
+```
+
+Trailing stop codons (`*` at sequence end) are always stripped regardless of mode.
+
 #### Non-JGI headers
 
 Some portals have non-standard FASTA headers. These require a per-portal ID mapping file (TSV with `canonical_protein_id`, `model_id`, `original_header`). Place in `idmaps/`.
@@ -193,6 +216,50 @@ fungalphylo interproscan-slurm /path/to/project --limit 5
 ```
 
 The launcher runs a submit-and-poll controller (one worker at a time to respect Puhti job limits). The worker loads `biokit` and `interproscan` modules. Failed sequences are automatically retried on resume.
+
+---
+
+## Compute: OrthoFinder
+
+Orthogroup inference on staged proteomes or gene family selections:
+
+```bash
+# Orthogroups only (recommended — skips expensive MSA/gene trees)
+fungalphylo orthofinder-slurm /path/to/project --og-only --submit
+
+# Full analysis with MSA-based gene trees and species tree
+fungalphylo orthofinder-slurm /path/to/project --submit
+
+# Target a specific staging snapshot
+fungalphylo orthofinder-slurm /path/to/project --og-only --staging-id <staging_id> --submit
+
+# Run on a gene family's selected FASTAs instead of full proteomes
+fungalphylo orthofinder-slurm /path/to/project --og-only --family-id mfs_sugar --submit
+
+# Run on an explicit directory of .faa files
+fungalphylo orthofinder-slurm /path/to/project --og-only --input-dir /path/to/fastas --submit
+
+# Resume a timed-out run (reuses DIAMOND results)
+fungalphylo orthofinder-slurm /path/to/project --resume-run-id <run_id> --submit
+
+# Override MSA program (default: mafft; famsa may crash on some systems)
+fungalphylo orthofinder-slurm /path/to/project --msa-program mafft --submit
+```
+
+**`--og-only`** uses `-M dendroblast` which skips MSA and gene tree inference. Orthogroup assignments are identical — MCL clustering happens before any MSA step. This avoids OrthoFinder v3's aggressive `--localpair --maxiterate 1000` MAFFT calls that can fail on large orthogroups.
+
+OrthoFinder requires a virtual environment on Puhti. Configure in `tools.yaml`:
+
+```yaml
+orthofinder:
+  env_activate: "/scratch/project_xxx/software/of3_env/bin/activate"
+  command: "orthofinder"
+  msa_program: "mafft"
+```
+
+The generated SLURM script handles `module purge` → `module load StdEnv` → `module load python-data` → `source env_activate` → `module load <msa_program>` automatically.
+
+SLURM defaults: 48h, 16 CPUs, 4G/cpu, `small` partition. Output in `runs/<run_id>/orthofinder_results/`.
 
 ---
 
@@ -416,6 +483,10 @@ blast:
   bin_dir: ""                      # optional, module loaded before select
   makeblastdb_cmd: "makeblastdb"
   blastp_cmd: "blastp"
+orthofinder:
+  env_activate: "/path/to/of3_env/bin/activate"  # venv activate script
+  command: "orthofinder"
+  msa_program: "mafft"             # famsa may crash on some systems
 ```
 
 When `bin_dir` is set, generated SLURM scripts add `export PATH="<bin_dir>:$PATH"`. When empty, scripts use `module load <tool>` instead. On Puhti, most tools are available via `module load` (e.g., `module load blast` before running `protsetphylo select`).
@@ -443,8 +514,9 @@ fungalphylo db query /path/to/project "SELECT * FROM families"
 |------|-------------|--------|
 | `--dry-run` | stage, restore, download | Validate without side effects |
 | `--continue-on-error` | stage, restore, download | Don't stop on first failure |
-| `--submit` | busco-slurm, interproscan-slurm, protsetphylo | Submit SLURM job after writing |
-| `--resume-run-id` | busco-slurm, interproscan-slurm | Resume a timed-out run |
+| `--submit` | busco-slurm, interproscan-slurm, orthofinder-slurm, protsetphylo | Submit SLURM job after writing |
+| `--resume-run-id` | busco-slurm, interproscan-slurm, orthofinder-slurm | Resume a timed-out run |
+| `--og-only` | orthofinder-slurm | Use dendroblast (skip MSA/gene trees) |
 | `--staging-id` | most compute commands | Target a specific snapshot |
 | `--no-confirm` | SLURM commands | Skip account confirmation prompt |
 

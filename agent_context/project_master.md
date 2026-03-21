@@ -15,6 +15,8 @@ This document is based on reading the current codebase first and the prior onboa
 7. `download`
 8. `stage`
 9. `busco-slurm`
+10. `interproscan-slurm`
+11. `protsetphylo` (`init` → `interproscan` → `select` → `build-fasta` → `align` → `tree`)
 
 The codebase is not large, but it already contains the right primitives for a durable pipeline:
 
@@ -45,7 +47,8 @@ A full real-data validation run has now completed successfully through `stage`, 
 - `src/fungalphylo/cli/main.py`
   - registers the user-facing CLI
 - `src/fungalphylo/cli/commands/`
-  - implemented commands: `init`, `ingest`, `fetch_index`, `autoselect`, `review`, `restore`, `download`, `stage`, `status`, `idmap`, `busco_slurm`, `db`
+  - implemented commands: `init`, `ingest`, `fetch_index`, `autoselect`, `review`, `restore`, `download`, `stage`, `status`, `idmap`, `busco_slurm`, `interproscan_slurm`, `orthofinder_slurm`, `db`, `taxonomy`, `failures`
+  - `protsetphylo/`: `init`, `interproscan`, `select`, `build_fasta`, `align`, `tree`
 - `src/fungalphylo/core/`
   - path handling, config, FASTA I/O, id mapping, manifests, events/errors, hashing, validation
 - `src/fungalphylo/db/`
@@ -80,11 +83,25 @@ A full real-data validation run has now completed successfully through `stage`, 
   - writes generated protein ID maps under `staging/<staging_id>/idmaps/generated/`
   - records snapshot-scoped artifact metadata in `staging_files`
   - reuses equivalent prior artifacts by cache key instead of regenerating them
+  - handles internal stop codons via `--internal-stop`: `drop` (default), `warn`, `strip`
+  - always strips trailing stop codons (`*` at sequence end)
 - `busco-slurm`
   - writes a Puhti-oriented SLURM script to run BUSCO on a chosen `staging_id`
 - `interproscan-slurm`
   - writes launcher/controller/worker SLURM scaffolding plus `queue.tsv` for staged proteomes
   - can resume an existing run in place with `--resume-run-id <run_id>` without rewriting the queue ledger
+- `protsetphylo`
+  - `init`: creates family directory with characterized proteins FASTA and Pfam config
+  - `interproscan`: generates SLURM script for InterProScan on characterized proteins
+  - `select`: selects proteins from project proteomes by Pfam/e-value/architecture; integrates characterized proteins via BLAST (replace best hit or append); writes per-species FASTAs ready for OrthoFinder
+  - `build-fasta`: merges selected FASTAs with optional MMseqs2/CD-HIT clustering and per-cluster splitting
+  - `align`: generates SLURM script for MAFFT + trimAl with configurable parameters
+  - `tree`: generates SLURM script for IQ-TREE or FastTree
+- `orthofinder-slurm`
+  - generates SLURM script for OrthoFinder on full proteomes, family selections, or custom input dirs
+  - `--og-only` uses `-M dendroblast` to skip MSA/gene trees (orthogroups identical to MSA mode)
+  - supports `--resume-run-id` to reuse DIAMOND results via `-b`
+  - handles Puhti venv activation and module loading automatically
 
 ### Database shape
 
@@ -230,10 +247,8 @@ Real-data validation currently on record:
 
 Least reliable areas:
 
-- remaining long-running command semantics outside the newly-tested paths
-- broader regression coverage
-- downstream BUSCO script generation/submission has not yet received the same real-data validation
-- the new InterProScan in-place resume path still needs confirmation from a live Puhti timeout/restart cycle
+- OrthoFinder integration is not yet automated (manual step between `select` and align/tree)
+- species-tree pipeline (full-proteome OrthoFinder → ASTRAL-Pro) is discussed but not implemented
 - residual drift between implementation and older onboarding notes
 
 ## 6. Maintainability Assessment

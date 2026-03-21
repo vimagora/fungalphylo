@@ -134,8 +134,8 @@ Known boundary:
 
 Same work:
 - the current approved portals, optionally filtered by `--portal-id`, plus staging parameters:
-  `min_aa`, `max_aa`, `probe_n`, `id_map`, `id_map_cds`, and `overwrite`
-- for each artifact, sameness is defined by the artifact cache key derived from source checksum and relevant parameters
+  `min_aa`, `max_aa`, `probe_n`, `id_map`, `id_map_cds`, `internal_stop`, and `overwrite`
+- for each artifact, sameness is defined by the artifact cache key derived from source checksum and relevant parameters (cache key schema v2 includes `internal_stop`)
 
 Completion proof:
 - snapshot directory `staging/<staging_id>/`
@@ -346,6 +346,30 @@ Skip behavior:
 Rerun contract:
 - always safe to rerun with different parameters (method, model, bootstrap)
 - creates a new run scaffold each time
+
+## `orthofinder-slurm`
+
+Same work:
+- a staging snapshot (or family selected dir, or explicit input dir), plus OrthoFinder options (msa_program, og_only)
+
+Completion proof:
+- generated SLURM script under `runs/<run_id>/slurm/`
+- `runs/<run_id>/manifest.json`
+- `runs` row in SQLite
+- OrthoFinder results under `runs/<run_id>/orthofinder_results/`
+
+Skip behavior:
+- none; rerunning creates a new run
+
+Rerun contract:
+- always safe to rerun; creates a new run scaffold each time
+- `--resume-run-id <run_id>` passes `-b <WorkingDirectory>` to OrthoFinder to reuse DIAMOND results
+- resume mode refreshes the SLURM script without creating a new manifest or DB row
+
+Operator guidance:
+- use `--og-only` (dendroblast mode) for orthogroup-only analysis; avoids expensive MSA on large orthogroups
+- OrthoFinder v3 uses `--localpair --maxiterate 1000` for gene tree MSAs, which can fail on large orthogroups
+- the generated script handles Puhti module setup automatically when `env_activate` is configured in tools.yaml
 
 ## Status Interpretation
 
