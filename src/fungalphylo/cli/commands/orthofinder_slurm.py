@@ -78,12 +78,14 @@ def _render_orthofinder_script(
         of_invocation = (
             f'"{of_cmd}" -b "{resume_from.as_posix()}"'
             f"{msa_opts}"
+            f' -o "{results_dir.as_posix()}"'
             f' -t "$THREADS"'
         )
     else:
         of_invocation = (
             f'"{of_cmd}" -f "{input_dir.as_posix()}"'
             f"{msa_opts}"
+            f' -o "{results_dir.as_posix()}"'
             f' -t "$THREADS"'
         )
 

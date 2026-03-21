@@ -101,6 +101,8 @@ def test_orthofinder_slurm_writes_script_for_latest_staging(tmp_path: Path, monk
     # Should use latest staging
     proteomes_dir = paths.staging_proteomes_dir("stg_new")
     assert f'-f "{proteomes_dir.as_posix()}"' in script
+    results_dir = project_dir / "runs" / "of_test" / "orthofinder_results"
+    assert f'-o "{results_dir.as_posix()}"' in script
     assert "-A mafft" in script
     assert "--time=48:00:00" in script
     assert "--cpus-per-task=16" in script
@@ -424,6 +426,7 @@ def test_orthofinder_slurm_og_only_flag(tmp_path: Path, monkeypatch) -> None:
 
     script = (project_dir / "runs/of_og/slurm/orthofinder.sbatch").read_text(encoding="utf-8")
     assert "-M dendroblast" in script
+    assert '-o "' in script  # output dir is set
     assert "-A mafft" not in script
     assert "dendroblast (orthogroups only)" in script
     assert "MSA program" not in script
