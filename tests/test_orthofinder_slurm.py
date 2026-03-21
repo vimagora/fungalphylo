@@ -107,6 +107,7 @@ def test_orthofinder_slurm_writes_script_for_latest_staging(tmp_path: Path, monk
     assert "--mem-per-cpu=4G" in script
     assert "module purge" not in script  # no env_activate configured
     assert "module load mafft" in script  # MSA tool always loaded
+    assert "WARNING" in result.output  # warns about missing env_activate
     assert manifest["kind"] == "orthofinder"
     assert manifest["source_kind"] == "staging"
     assert manifest["source_id"] == "stg_new"
@@ -424,6 +425,8 @@ def test_orthofinder_slurm_og_only_flag(tmp_path: Path, monkeypatch) -> None:
     script = (project_dir / "runs/of_og/slurm/orthofinder.sbatch").read_text(encoding="utf-8")
     assert "-M dendroblast" in script
     assert "-A mafft" not in script
+    assert "dendroblast (orthogroups only)" in script
+    assert "MSA program" not in script
 
     manifest = json.loads(
         (project_dir / "runs/of_og/manifest.json").read_text(encoding="utf-8")
@@ -456,6 +459,7 @@ def test_orthofinder_slurm_og_only_not_set_by_default(tmp_path: Path, monkeypatc
     script = (project_dir / "runs/of_no_og/slurm/orthofinder.sbatch").read_text(encoding="utf-8")
     assert "-M dendroblast" not in script
     assert "-A mafft" in script
+    assert "msa (MSA program: mafft)" in script
 
     manifest = json.loads(
         (project_dir / "runs/of_no_og/manifest.json").read_text(encoding="utf-8")

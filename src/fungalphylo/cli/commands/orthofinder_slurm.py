@@ -110,7 +110,7 @@ THREADS="${{SLURM_CPUS_PER_TASK:-1}}"
 echo "Running OrthoFinder"
 echo "Input dir:   {input_dir.as_posix()}"
 echo "Results dir: {results_dir.as_posix()}"
-echo "MSA program: {msa_program}"
+echo "Mode:        {'dendroblast (orthogroups only)' if og_only else f'msa (MSA program: {msa_program})'}"
 echo "Threads:     $THREADS"
 
 {of_invocation}
@@ -333,6 +333,11 @@ def orthofinder_slurm_command(
         of_cmd = tools.orthofinder.command
         selected_msa = msa_program or tools.orthofinder.msa_program
         env_activate = tools.orthofinder.env_activate
+        if env_activate is None:
+            typer.echo(
+                "WARNING: orthofinder.env_activate not set in tools.yaml. "
+                "The generated script will assume orthofinder is on PATH."
+            )
         rid = run_id or f"orthofinder_{now_tag()}"
         resume_from = None
 
