@@ -468,3 +468,35 @@ def test_orthofinder_slurm_og_only_not_set_by_default(tmp_path: Path, monkeypatc
         (project_dir / "runs/of_no_og/manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["orthofinder"]["og_only"] is False
+
+
+def test_orthofinder_slurm_mem_scales_with_proteome_count(tmp_path: Path, monkeypatch) -> None:
+    """>=60 proteomes → 8G default; <60 → 4G (covered by other tests)."""
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+    _seed_staging(paths, "stg_big", n_proteomes=70)
+    _write_tools_yaml(paths)
+
+    monkeypatch.setattr(
+        "fungalphylo.cli.commands.orthofinder_slurm.subprocess.run",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "orthofinder-slurm",
+            "--account", "project_123",
+            "--run-id", "of_big",
+            str(project_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    script = (project_dir / "runs/of_big/slurm/orthofinder.sbatch").read_text(encoding="utf-8")
+    assert "--mem-per-cpu=8G" in script
+
+    manifest = json.loads(
+        (project_dir / "runs/of_big/manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["slurm"]["mem_per_cpu"] == "8G"

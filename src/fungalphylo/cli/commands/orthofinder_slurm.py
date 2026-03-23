@@ -343,10 +343,12 @@ def orthofinder_slurm_command(
         rid = run_id or f"orthofinder_{now_tag()}"
         resume_from = None
 
-        # Apply defaults
+        # Apply defaults — scale memory with proteome count
+        n_proteomes = len(list(resolved_input_dir.glob("*.faa")))
+        default_mem = "8G" if n_proteomes >= 60 else "4G"
         time = time or "48:00:00"
         cpus = cpus if cpus is not None else 16
-        mem_per_cpu = mem_per_cpu or "4G"
+        mem_per_cpu = mem_per_cpu or default_mem
         partition = partition or "small"
 
     if not acct:
@@ -360,7 +362,7 @@ def orthofinder_slurm_command(
     logs_dir = paths.logs_dir / "slurm"
 
     _ensure_dir(slurm_dir)
-    _ensure_dir(results_dir)
+    # Do NOT create results_dir here — OrthoFinder requires it to not exist
     _ensure_dir(logs_dir)
 
     script_path = slurm_dir / "orthofinder.sbatch"
