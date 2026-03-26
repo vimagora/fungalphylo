@@ -38,9 +38,11 @@ init → ingest → fetch-index → autoselect → review → restore → downlo
 
 ### Compute Track (after staging)
 ```
-busco-slurm          # Quality control
-interproscan-slurm   # Domain annotation
-protsetphylo         # Gene family phylogenomics (new)
+busco-slurm            # Quality control
+interproscan-slurm     # Domain annotation
+orthofinder-slurm      # Orthogroup inference
+filter-orthogroups     # Select single-copy orthogroups
+protsetphylo           # Gene family phylogenomics
 ```
 
 ---
@@ -259,7 +261,36 @@ orthofinder:
 
 The generated SLURM script handles `module purge` → `module load StdEnv` → `module load python-data` → `source env_activate` → `module load <msa_program>` automatically.
 
-SLURM defaults: 48h, 16 CPUs, 4G/cpu, `small` partition. Output in `runs/<run_id>/orthofinder_results/`.
+SLURM defaults: 48h, 16 CPUs, `small` partition. Memory scales with proteome count: 4G/cpu for <60 proteomes, 8G/cpu for ≥60. Output in `runs/<run_id>/orthofinder_results/`.
+
+---
+
+## Filter Orthogroups
+
+After OrthoFinder completes, filter orthogroups by single-copy species occupancy for downstream phylogenomics (MAFFT → trimAl → IQ-TREE → ASTRAL-Pro):
+
+```bash
+# Filter from latest OrthoFinder run (default: ≥75% single-copy)
+fungalphylo filter-orthogroups /path/to/project
+
+# Explicit run ID
+fungalphylo filter-orthogroups /path/to/project --run-id <run_id>
+
+# Custom threshold (e.g., 80%)
+fungalphylo filter-orthogroups /path/to/project --min-single-copy 0.80
+
+# Point at OrthoFinder results directly
+fungalphylo filter-orthogroups /path/to/project --results-dir /path/to/orthofinder_results
+
+# Custom output directory
+fungalphylo filter-orthogroups /path/to/project --output-dir /path/to/output
+```
+
+An orthogroup passes if at least `--min-single-copy` fraction of species have exactly 1 gene in the OG. Species with 0 or multiple copies are allowed — ASTRAL-Pro handles paralogs.
+
+Outputs in `runs/<run_id>/filtered_orthogroups/`:
+- `<OG_ID>.fa` — FASTA files for selected orthogroups
+- `filter_summary.tsv` — per-OG stats (single-copy, multi-copy, missing counts)
 
 ---
 
@@ -517,6 +548,7 @@ fungalphylo db query /path/to/project "SELECT * FROM families"
 | `--submit` | busco-slurm, interproscan-slurm, orthofinder-slurm, protsetphylo | Submit SLURM job after writing |
 | `--resume-run-id` | busco-slurm, interproscan-slurm, orthofinder-slurm | Resume a timed-out run |
 | `--og-only` | orthofinder-slurm | Use dendroblast (skip MSA/gene trees) |
+| `--min-single-copy` | filter-orthogroups | Fraction of species with exactly 1 copy (default: 0.75) |
 | `--staging-id` | most compute commands | Target a specific snapshot |
 | `--no-confirm` | SLURM commands | Skip account confirmation prompt |
 

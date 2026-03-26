@@ -7,6 +7,7 @@ from fungalphylo.cli.commands import busco as busco_cmd
 from fungalphylo.cli.commands import busco_slurm as busco_slurm_cmd
 from fungalphylo.cli.commands import db as db_cmd
 from fungalphylo.cli.commands import download as download_cmd
+from fungalphylo.cli.commands import filter_orthogroups as filter_orthogroups_cmd
 from fungalphylo.cli.commands import fetch_index as fetch_index_cmd
 from fungalphylo.cli.commands import idmap as idmap_cmd
 from fungalphylo.cli.commands import ingest as ingest_cmd
@@ -39,6 +40,7 @@ app.add_typer(busco_cmd.app, name="busco")
 app.add_typer(busco_slurm_cmd.app, name="busco-slurm")
 app.add_typer(interproscan_slurm_cmd.app, name="interproscan-slurm")
 app.add_typer(orthofinder_slurm_cmd.app, name="orthofinder-slurm")
+app.add_typer(filter_orthogroups_cmd.app, name="filter-orthogroups")
 app.add_typer(protsetphylo_cmd.app, name="protsetphylo")
 
 
