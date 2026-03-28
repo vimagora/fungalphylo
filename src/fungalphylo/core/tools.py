@@ -37,6 +37,10 @@ orthofinder:
   command: "orthofinder"
   # MSA program for gene trees (default: "mafft"; famsa may crash on some systems)
   msa_program: "mafft"
+hmmer:
+  # HMMER tools for HMM-based sequence placement. On Puhti: module load biokit
+  hmmbuild_cmd: "hmmbuild"
+  hmmsearch_cmd: "hmmsearch"
 """
 
 @dataclass(frozen=True)
@@ -90,6 +94,13 @@ class OrthoFinderTool:
 
 
 @dataclass(frozen=True)
+class HmmerTool:
+    bin_dir: Path | None = None
+    hmmbuild_cmd: str = "hmmbuild"
+    hmmsearch_cmd: str = "hmmsearch"
+
+
+@dataclass(frozen=True)
 class ToolsConfig:
     busco: BuscoTool
     interproscan: InterProScanTool
@@ -99,6 +110,7 @@ class ToolsConfig:
     fasttree: FasttreeTool = FasttreeTool()
     blast: BlastTool = BlastTool()
     orthofinder: OrthoFinderTool = OrthoFinderTool()
+    hmmer: HmmerTool = HmmerTool()
 
 
 def load_tools(project_dir: Path) -> ToolsConfig:
@@ -160,6 +172,12 @@ def load_tools(project_dir: Path) -> ToolsConfig:
     of_cmd = (of_data.get("command") or "orthofinder").strip() or "orthofinder"
     of_msa = (of_data.get("msa_program") or "mafft").strip() or "mafft"
 
+    hmmer_data = data.get("hmmer") or {}
+    hmmer_bin_dir_raw = (hmmer_data.get("bin_dir") or "").strip()
+    hmmer_bin_dir = Path(hmmer_bin_dir_raw).expanduser().resolve() if hmmer_bin_dir_raw else None
+    hmmbuild_cmd = (hmmer_data.get("hmmbuild_cmd") or "hmmbuild").strip() or "hmmbuild"
+    hmmsearch_cmd = (hmmer_data.get("hmmsearch_cmd") or "hmmsearch").strip() or "hmmsearch"
+
     return ToolsConfig(
         busco=BuscoTool(bin_dir=bin_dir, command=cmd),
         interproscan=InterProScanTool(bin_dir=ipr_bin_dir, command=ipr_cmd),
@@ -169,6 +187,7 @@ def load_tools(project_dir: Path) -> ToolsConfig:
         fasttree=FasttreeTool(bin_dir=fasttree_bin_dir, command=fasttree_cmd),
         blast=BlastTool(bin_dir=blast_bin_dir, makeblastdb_cmd=makeblastdb_cmd, blastp_cmd=blastp_cmd),
         orthofinder=OrthoFinderTool(env_activate=of_env, command=of_cmd, msa_program=of_msa),
+        hmmer=HmmerTool(bin_dir=hmmer_bin_dir, hmmbuild_cmd=hmmbuild_cmd, hmmsearch_cmd=hmmsearch_cmd),
     )
 
 

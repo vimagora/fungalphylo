@@ -391,9 +391,12 @@ def select_command(
         total_selected += len(selected_records)
         portals_with_hits += 1
 
-    # Write standalone characterized proteins (no portal_id), grouped by short_name
+    # Write standalone characterized proteins (no portal_id) to a separate directory
+    # so they don't interfere with OrthoFinder (too few sequences per file)
+    standalone_dir = selected_dir / "standalone"
+    standalone_dir.mkdir(parents=True, exist_ok=True)
     for short_name, char_recs in sorted(standalone_char.items()):
-        out_fasta = selected_dir / f"{short_name}.faa"
+        out_fasta = standalone_dir / f"{short_name}.faa"
         write_fasta(char_recs, out_fasta)
         total_selected += len(char_recs)
         portals_with_hits += 1

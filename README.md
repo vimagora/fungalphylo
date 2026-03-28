@@ -337,7 +337,7 @@ Analyze specific gene families (e.g., MFS sugar transporters) across your staged
 ### Pipeline
 
 ```
-protsetphylo init → interproscan → select → orthofinder-slurm → og-report → og-apply → phylo-slurm
+protsetphylo init → interproscan → select → orthofinder-slurm → og-report → og-apply → [place-standalone] → phylo-slurm
                                       ↓
                               (optional quick path)
                           build-fasta → MMseqs2/CD-HIT → align → tree
@@ -395,11 +395,11 @@ Selection logic:
 
 Characterized protein integration (requires BLAST on PATH):
 - **With `portal_id`**: BLASTs the characterized protein against that portal's selected proteins. Best hit is replaced with the characterized sequence (header + sequence). If no hit, the characterized protein is appended.
-- **Without `portal_id`**: Written as a standalone FASTA grouped by `short_name` (e.g., outgroup species)
+- **Without `portal_id`**: Written to `families/<family_id>/selected/standalone/` (separated from portal FASTAs to avoid OrthoFinder issues with single-sequence species files)
 - `--blast-evalue` controls the BLAST cutoff (default: 10.0)
 - If BLAST is not available, characterized proteins are appended with a warning
 
-Output: per-species FASTAs in `families/<family_id>/selected/` plus `selection_report.tsv`. This directory is ready to be used as input for OrthoFinder.
+Output: per-species FASTAs in `families/<family_id>/selected/` plus `selection_report.tsv`. Standalone characterized proteins go to `selected/standalone/`. The `selected/` directory (excluding `standalone/`) is ready for OrthoFinder.
 
 #### 4. OrthoFinder on selected proteins
 
@@ -440,7 +440,24 @@ fungalphylo protsetphylo og-apply /path/to/project \
 
 Outputs FASTAs to `families/mfs_sugar/og_selected/`, ready for the next step.
 
-#### 7. Gene tree inference with `phylo-slurm`
+#### 7. Place standalone characterized genes (optional)
+
+If some characterized genes have no `portal_id` (e.g., outgroup species), they were excluded from OrthoFinder. Place them into OGs using HMM profiles:
+
+```bash
+fungalphylo protsetphylo place-standalone /path/to/project \
+  --family-id mfs_sugar --account project_xxx --submit
+```
+
+Generates a SLURM script that:
+- Aligns each OG with MAFFT, builds HMM profiles with `hmmbuild`
+- Searches standalone sequences against all profiles with `hmmsearch`
+- Appends each sequence to its best-matching OG
+- Writes `placements.tsv` report
+
+Requires HMMER (on Puhti: `module load biokit`). Skip this step if all characterized genes have portal IDs.
+
+#### 8. Gene tree inference with `phylo-slurm`
 
 ```bash
 fungalphylo phylo-slurm /path/to/project \
@@ -526,8 +543,18 @@ families/<family_id>/
     pfams.txt                  # Target Pfam accessions
   selected/
     <portal_id>.faa            # Per-species FASTAs (OrthoFinder input)
-    <short_name>.faa           # Standalone characterized species
+    standalone/                # Characterized genes without portal_id
+      <short_name>.faa         # One per outgroup species
     selection_report.tsv       # What was selected and why
+  og_report/                   # OG inspection reports
+    characterized_og_matrix.*  # Characterized genes x OGs (TSV + HTML)
+    portal_og_matrix.*         # Portal gene counts x OGs (TSV + HTML)
+    og_decisions.txt           # Editable include/merge template
+  og_selected/                 # OG FASTAs after apply + place-standalone
+    <OG_ID>.fa                 # Included OGs
+    merge_<OG_ID>.fa           # Merged OG groups
+  place_standalone/            # HMM placement working directory
+    placements.tsv             # Placement report
   fasta/                       # Only if using build-fasta quick path
     combined.faa               # Merged/clustered sequences
     combined.pre_dedup.faa     # Pre-dedup backup (if clustering)
@@ -592,6 +619,9 @@ orthofinder:
   env_activate: "/path/to/of3_env/bin/activate"  # venv activate script
   command: "orthofinder"
   msa_program: "mafft"             # famsa may crash on some systems
+hmmer:
+  hmmbuild_cmd: "hmmbuild"         # On Puhti: module load biokit
+  hmmsearch_cmd: "hmmsearch"
 ```
 
 When `bin_dir` is set, generated SLURM scripts add `export PATH="<bin_dir>:$PATH"`. When empty, scripts use `module load <tool>` instead. On Puhti, most tools are available via `module load` (e.g., `module load blast` before running `protsetphylo select`).

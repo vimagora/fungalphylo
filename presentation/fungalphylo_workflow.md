@@ -293,12 +293,12 @@ For analyzing specific gene families (e.g., MFS sugar transporters):
 
 ```
 protsetphylo init -> interproscan -> select -> orthofinder-slurm
-    -> og-report -> og-apply -> phylo-slurm
+    -> og-report -> og-apply -> [place-standalone] -> phylo-slurm
 ```
 
 Steps 1-3: Define family, annotate, select matching proteins
 
-Steps 4-7: OrthoFinder -> inspect OGs -> select/merge -> gene trees
+Steps 4-8: OrthoFinder -> inspect OGs -> select/merge -> place outgroup genes -> gene trees
 
 ---
 
@@ -337,7 +337,23 @@ fungalphylo protsetphylo og-apply --family-id mfs_sugar \
 
 - Copies included OGs as-is
 - Merges specified groups into single FASTAs
-- Output: `families/mfs_sugar/og_selected/` (ready for `phylo-slurm --input-dir`)
+- Output: `families/mfs_sugar/og_selected/` (ready for next step)
+
+---
+
+# protsetphylo: Place Standalone (optional)
+
+Characterized genes without `portal_id` (outgroups) are excluded from OrthoFinder. Place them into OGs using HMM profiles:
+
+```bash
+fungalphylo protsetphylo place-standalone --family-id mfs_sugar \
+  --account project_xxx --submit /path/to/project
+```
+
+- Aligns each OG with MAFFT, builds HMM profiles with hmmbuild
+- Searches standalone sequences against all profiles with hmmsearch
+- Appends each sequence to its best-matching OG
+- Skip if all characterized genes have portal IDs
 
 ---
 
@@ -426,4 +442,4 @@ init -> ingest -> fetch-index -> autoselect -> review
                                    ASTRAL-Pro
 ```
 
-Gene family path: `protsetphylo init -> interproscan -> select -> orthofinder-slurm -> og-report -> og-apply -> phylo-slurm`
+Gene family path: `protsetphylo init -> interproscan -> select -> orthofinder-slurm -> og-report -> og-apply -> [place-standalone] -> phylo-slurm`

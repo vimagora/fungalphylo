@@ -169,7 +169,7 @@ def test_select_finds_matching_proteins(tmp_path: Path) -> None:
     selected_dir = paths.family_selected_dir("mfs_sugar")
     assert (selected_dir / "Portal1.faa").exists()
     assert (selected_dir / "Portal2.faa").exists()
-    assert (selected_dir / "Ambmo.faa").exists()  # standalone characterized
+    assert (selected_dir / "standalone" / "Ambmo.faa").exists()  # standalone characterized
 
     # Check Portal1 content: selected prot_A + appended characterized Sp1|LAT1
     portal1_records = list(iter_fasta(selected_dir / "Portal1.faa"))
@@ -182,7 +182,7 @@ def test_select_finds_matching_proteins(tmp_path: Path) -> None:
     assert len(portal2_records) == 1
 
     # Check standalone
-    ambmo_records = list(iter_fasta(selected_dir / "Ambmo.faa"))
+    ambmo_records = list(iter_fasta(selected_dir / "standalone" / "Ambmo.faa"))
     assert len(ambmo_records) == 1
     assert ambmo_records[0].header == "Ambmo|STP1"
 
