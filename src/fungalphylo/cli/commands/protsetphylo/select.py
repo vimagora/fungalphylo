@@ -341,16 +341,18 @@ def select_command(
                 out_fasta_tmp = selected_dir / f"{portal_id}.faa"
                 write_fasta(selected_records, out_fasta_tmp)
 
+                already_replaced: set[str] = set()
                 for _header, char_rec, _row in portal_char[portal_id]:
                     best_hit = _blast_characterized_against_portal(
                         char_rec, out_fasta_tmp, makeblastdb_cmd, blastp_cmd, blast_evalue,
                     )
-                    if best_hit:
+                    if best_hit and best_hit not in already_replaced:
                         # Replace best hit with characterized protein
                         selected_records = [
                             char_rec if r.header == best_hit else r
                             for r in selected_records
                         ]
+                        already_replaced.add(best_hit)
                         char_integrated += 1
                         report_rows.append({
                             "portal_id": portal_id,
@@ -361,16 +363,19 @@ def select_command(
                             "reason": f"characterized_replaced:{best_hit}",
                         })
                     else:
-                        # No hit — append
+                        # No hit or target already replaced — append
                         selected_records.append(char_rec)
                         char_appended += 1
+                        reason = "characterized_appended"
+                        if best_hit and best_hit in already_replaced:
+                            reason = f"characterized_appended:target_taken:{best_hit}"
                         report_rows.append({
                             "portal_id": portal_id,
                             "protein_id": char_rec.header,
                             "architecture": "",
                             "arch_match": "",
                             "selected": "yes",
-                            "reason": "characterized_appended",
+                            "reason": reason,
                         })
             else:
                 # BLAST not available — append characterized proteins directly
