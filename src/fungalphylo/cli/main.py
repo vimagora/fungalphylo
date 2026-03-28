@@ -14,6 +14,7 @@ from fungalphylo.cli.commands import ingest as ingest_cmd
 from fungalphylo.cli.commands import init as init_cmd
 from fungalphylo.cli.commands import interproscan_slurm as interproscan_slurm_cmd
 from fungalphylo.cli.commands import orthofinder_slurm as orthofinder_slurm_cmd
+from fungalphylo.cli.commands import phylo_slurm as phylo_slurm_cmd
 from fungalphylo.cli.commands import protsetphylo as protsetphylo_cmd
 from fungalphylo.cli.commands import restore as restore_cmd
 from fungalphylo.cli.commands import review as review_cmd
@@ -41,6 +42,7 @@ app.add_typer(busco_slurm_cmd.app, name="busco-slurm")
 app.add_typer(interproscan_slurm_cmd.app, name="interproscan-slurm")
 app.add_typer(orthofinder_slurm_cmd.app, name="orthofinder-slurm")
 app.add_typer(filter_orthogroups_cmd.app, name="filter-orthogroups")
+app.add_typer(phylo_slurm_cmd.app, name="phylo-slurm")
 app.add_typer(protsetphylo_cmd.app, name="protsetphylo")
 
 

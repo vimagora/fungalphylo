@@ -42,6 +42,7 @@ busco-slurm            # Quality control
 interproscan-slurm     # Domain annotation
 orthofinder-slurm      # Orthogroup inference
 filter-orthogroups     # Select single-copy orthogroups
+phylo-slurm            # Parallel gene tree inference (MAFFT → trimAl → IQ-TREE)
 protsetphylo           # Gene family phylogenomics
 ```
 
@@ -294,6 +295,41 @@ Outputs in `runs/<run_id>/filtered_orthogroups/`:
 
 ---
 
+## Compute: Gene Trees (`phylo-slurm`)
+
+SLURM array job running MAFFT → trimAl → IQ-TREE per orthogroup in parallel:
+
+```bash
+# From filtered orthogroups (auto-detect)
+fungalphylo phylo-slurm /path/to/project --submit
+
+# From a specific OrthoFinder run
+fungalphylo phylo-slurm /path/to/project --run-id <orthofinder_run_id> --submit
+
+# From an explicit directory of .fa files
+fungalphylo phylo-slurm /path/to/project --input-dir /path/to/fastas --submit
+
+# Custom parameters
+fungalphylo phylo-slurm /path/to/project \
+  --mafft-maxiterate 500 --trimal-gt 0.5 \
+  --iqtree-model LG+G4 --iqtree-bootstrap 2000 --submit
+```
+
+Default parameters per array task:
+- **MAFFT**: `--retree 2 --maxiterate 1000`
+- **trimAl**: `-gt 0.8 -cons 10`
+- **IQ-TREE**: `-m TEST -B 1000 -alrt 1000`
+- **SLURM**: 16 CPUs, 2G/cpu, 12h, max 380 concurrent tasks (Puhti safe limit)
+
+Only MAFFT is loaded via `module load mafft`. trimAl and IQ-TREE3 use binaries configured via `bin_dir` in `tools.yaml`.
+
+Output per OG in `runs/<run_id>/gene_trees/<OG_ID>/`:
+- `<OG_ID>.aligned.faa` — MAFFT alignment
+- `<OG_ID>.trimmed.faa` — trimAl output
+- `<OG_ID>.treefile` — IQ-TREE gene tree
+
+---
+
 ## Compute: Gene Family Phylogenomics (`protsetphylo`)
 
 Analyze specific gene families (e.g., MFS sugar transporters) across your staged proteomes.
@@ -301,13 +337,13 @@ Analyze specific gene families (e.g., MFS sugar transporters) across your staged
 ### Pipeline
 
 ```
-protsetphylo init → interproscan → select → [OrthoFinder] → align → tree
+protsetphylo init → interproscan → select → orthofinder-slurm → og-report → og-apply → phylo-slurm
                                       ↓
                               (optional quick path)
                           build-fasta → MMseqs2/CD-HIT → align → tree
 ```
 
-The recommended (publication-quality) path uses OrthoFinder on the per-species FASTAs produced by `select`. The optional quick path uses `build-fasta` with MMseqs2/CD-HIT clustering for fast exploratory analysis.
+The recommended path uses OrthoFinder on the per-species FASTAs from `select`, then `og-report` to inspect orthogroups containing characterized genes, `og-apply` to select/merge OGs, and `phylo-slurm` for parallel MAFFT → trimAl → IQ-TREE. The optional quick path uses `build-fasta` with clustering for fast exploratory analysis.
 
 ### Step-by-step
 
@@ -365,17 +401,55 @@ Characterized protein integration (requires BLAST on PATH):
 
 Output: per-species FASTAs in `families/<family_id>/selected/` plus `selection_report.tsv`. This directory is ready to be used as input for OrthoFinder.
 
-#### 4a. Recommended: OrthoFinder (publication-quality)
-
-Run OrthoFinder on the `selected/` directory to identify orthogroups via MCL clustering:
+#### 4. OrthoFinder on selected proteins
 
 ```bash
-orthofinder -f /path/to/project/families/mfs_sugar/selected/
+fungalphylo orthofinder-slurm /path/to/project \
+  --family-id mfs_sugar --og-only --submit
 ```
 
-Then inspect the orthogroups, pick those of interest (especially ones containing characterized proteins), and align + tree each one.
+Runs OrthoFinder on `families/mfs_sugar/selected/` to identify orthogroups via MCL clustering.
 
-#### 4b. Optional: Quick clustering with `build-fasta`
+#### 5. Inspect orthogroups with `og-report`
+
+```bash
+fungalphylo protsetphylo og-report /path/to/project \
+  --family-id mfs_sugar --run-id <orthofinder_run_id>
+```
+
+Generates reports in `families/mfs_sugar/og_report/`:
+- `characterized_og_matrix.tsv/.html` — which characterized genes are in which OGs
+- `portal_og_matrix.tsv/.html` — gene counts per portal for OGs with characterized genes (color-coded)
+- `og_decisions.txt` — editable template for selecting/merging OGs
+
+#### 6. Apply OG decisions with `og-apply`
+
+Edit `og_decisions.txt` to specify which OGs to keep and which to merge:
+
+```
+include: OG0000001,OG0000005
+merge: OG0000002,OG0000003;OG0000004,OG0000006
+```
+
+The above keeps OG0000001 and OG0000005 as-is, merges OG0000002+OG0000003 into one FASTA, and merges OG0000004+OG0000006 into another.
+
+```bash
+fungalphylo protsetphylo og-apply /path/to/project \
+  --family-id mfs_sugar --run-id <orthofinder_run_id>
+```
+
+Outputs FASTAs to `families/mfs_sugar/og_selected/`, ready for the next step.
+
+#### 7. Gene tree inference with `phylo-slurm`
+
+```bash
+fungalphylo phylo-slurm /path/to/project \
+  --input-dir /path/to/project/families/mfs_sugar/og_selected/ --submit
+```
+
+Runs a SLURM array job: MAFFT → trimAl → IQ-TREE per OG. Gene trees output in `runs/<run_id>/gene_trees/<OG_ID>/`.
+
+#### Optional: Quick clustering with `build-fasta`
 
 For fast exploratory analysis without OrthoFinder:
 
@@ -545,8 +619,9 @@ fungalphylo db query /path/to/project "SELECT * FROM families"
 |------|-------------|--------|
 | `--dry-run` | stage, restore, download | Validate without side effects |
 | `--continue-on-error` | stage, restore, download | Don't stop on first failure |
-| `--submit` | busco-slurm, interproscan-slurm, orthofinder-slurm, protsetphylo | Submit SLURM job after writing |
+| `--submit` | busco-slurm, interproscan-slurm, orthofinder-slurm, phylo-slurm, protsetphylo | Submit SLURM job after writing |
 | `--resume-run-id` | busco-slurm, interproscan-slurm, orthofinder-slurm | Resume a timed-out run |
+| `--max-concurrent` | phylo-slurm | Max concurrent array tasks (default: 380) |
 | `--og-only` | orthofinder-slurm | Use dendroblast (skip MSA/gene trees) |
 | `--min-single-copy` | filter-orthogroups | Fraction of species with exactly 1 copy (default: 0.75) |
 | `--staging-id` | most compute commands | Target a specific snapshot |

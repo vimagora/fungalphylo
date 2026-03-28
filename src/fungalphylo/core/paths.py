@@ -165,6 +165,12 @@ class ProjectPaths:
     def family_tree_dir(self, family_id: str) -> Path:
         return self.family_dir(family_id) / "tree"
 
+    def family_og_report_dir(self, family_id: str) -> Path:
+        return self.family_dir(family_id) / "og_report"
+
+    def family_og_selected_dir(self, family_id: str) -> Path:
+        return self.family_dir(family_id) / "og_selected"
+
     def family_manifest(self, family_id: str) -> Path:
         return self.family_dir(family_id) / "manifest.json"
 
