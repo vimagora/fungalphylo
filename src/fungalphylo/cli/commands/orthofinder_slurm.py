@@ -67,7 +67,7 @@ def _render_orthofinder_script(
     # Default: -M msa with -os (stop after orthogroup sequences, skip tree inference)
     # Full: -M msa without -os (runs full pipeline including species tree)
     if og_only:
-        msa_opts = " -os"
+        msa_opts = " -M msa -os"
     else:
         msa_opts = " -M msa"
 

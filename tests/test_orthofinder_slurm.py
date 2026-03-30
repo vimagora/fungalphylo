@@ -422,7 +422,7 @@ def test_orthofinder_slurm_og_only_flag(tmp_path: Path, monkeypatch) -> None:
     assert result.exit_code == 0, result.output
 
     script = (project_dir / "runs/of_og/slurm/orthofinder.sbatch").read_text(encoding="utf-8")
-    assert " -os" in script
+    assert "-M msa -os" in script
     assert '-o "' in script  # output dir is set
     assert "orthogroups + sequences only" in script
 

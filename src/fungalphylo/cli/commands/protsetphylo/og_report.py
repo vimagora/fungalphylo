@@ -61,25 +61,25 @@ def _match_characterized_to_ogs(
     og_data: dict[str, dict[str, list[str]]],
     char_rows: list[dict[str, str]],
 ) -> dict[str, set[str]]:
-    """Return {og_id: {short_name, ...}} for OGs containing characterized genes.
+    """Return {og_id: {header, ...}} for OGs containing characterized genes.
 
     Matches characterized headers (short_name|protein_name) against gene IDs in OGs.
     """
     # Build set of characterized headers
-    char_headers: dict[str, str] = {}  # header -> short_name
+    char_header_set: set[str] = set()
     for row in char_rows:
         sn = row.get("short_name", "").strip()
         pn = row.get("protein_name", "").strip()
         if sn and pn:
-            char_headers[f"{sn}|{pn}"] = sn
+            char_header_set.add(f"{sn}|{pn}")
 
     og_char: dict[str, set[str]] = {}
     for og_id, portal_genes in og_data.items():
         found: set[str] = set()
         for gene_list in portal_genes.values():
             for gene_id in gene_list:
-                if gene_id in char_headers:
-                    found.add(char_headers[gene_id])
+                if gene_id in char_header_set:
+                    found.add(gene_id)
         if found:
             og_char[og_id] = found
     return og_char
@@ -171,7 +171,17 @@ def og_report_command(
         None, "--results-dir",
         help="Explicit path to OrthoFinder results root.",
     ),
+    orientation: str = typer.Option(
+        "horizontal", "--orientation",
+        help="Table orientation: horizontal (OGs as rows) or vertical (OGs as columns).",
+    ),
 ) -> None:
+    if orientation not in ("horizontal", "vertical"):
+        raise typer.BadParameter(
+            f"--orientation must be horizontal or vertical. Got: {orientation!r}"
+        )
+    vertical = orientation == "vertical"
+
     project_dir = project_dir.expanduser().resolve()
     paths = ProjectPaths(project_dir)
     ensure_project_dirs(paths)
@@ -185,7 +195,21 @@ def og_report_command(
             f"Run `protsetphylo init --family-id {family_id}` first."
         )
     char_rows = _load_characterized(char_tsv)
-    short_names = sorted({r["short_name"].strip() for r in char_rows if r.get("short_name", "").strip()})
+    # Build display labels and match headers for characterized proteins.
+    # Display: portal_id|protein_name when portal is available, else short_name|protein_name.
+    # Match header (what OrthoFinder sees): always short_name|protein_name.
+    char_match_to_display: dict[str, str] = {}  # match_header -> display_label
+    for r in char_rows:
+        sn = r.get("short_name", "").strip()
+        pn = r.get("protein_name", "").strip()
+        portal = r.get("portal_id", "").strip()
+        if not sn or not pn:
+            continue
+        match_header = f"{sn}|{pn}"
+        display_label = f"{portal}|{pn}" if portal else match_header
+        char_match_to_display[match_header] = display_label
+    char_proteins = sorted(char_match_to_display.keys())
+    char_display = [char_match_to_display[p] for p in char_proteins]
 
     # Resolve OrthoFinder results
     if results_dir is not None:
@@ -230,56 +254,89 @@ def og_report_command(
     # Sort OGs by number of characterized genes (descending)
     og_ids = sorted(og_char.keys(), key=lambda x: (-len(og_char[x]), x))
 
-    typer.echo(f"Characterized genes: {len(short_names)}")
+    typer.echo(f"Characterized genes: {len(char_proteins)}")
     typer.echo(f"Total orthogroups:   {len(og_data)}")
     typer.echo(f"OGs with characterized genes: {len(og_ids)}")
+    typer.echo(f"Orientation:         {orientation}")
 
     # Output directory
     report_dir = paths.family_og_report_dir(family_id)
     report_dir.mkdir(parents=True, exist_ok=True)
 
     # Report 1: Characterized × OG
-    char_headers = ["orthogroup"] + short_names + ["characterized_count"]
-    char_rows_out: list[list[str]] = []
-    for og_id in og_ids:
-        found = og_char[og_id]
-        row = [og_id]
-        for sn in short_names:
-            row.append("x" if sn in found else "")
-        row.append(str(len(found)))
-        char_rows_out.append(row)
+    if vertical:
+        # Rows = proteins, Columns = OGs
+        char_headers_out = ["protein"] + og_ids + ["og_count"]
+        char_rows_out: list[list[str]] = []
+        for prot, display in zip(char_proteins, char_display):
+            row = [display]
+            count = 0
+            for og_id in og_ids:
+                if prot in og_char[og_id]:
+                    row.append("x")
+                    count += 1
+                else:
+                    row.append("")
+            row.append(str(count))
+            char_rows_out.append(row)
+    else:
+        # Rows = OGs, Columns = proteins (horizontal, original)
+        char_headers_out = ["orthogroup"] + char_display + ["characterized_count"]
+        char_rows_out = []
+        for og_id in og_ids:
+            found = og_char[og_id]
+            row = [og_id]
+            for prot in char_proteins:
+                row.append("x" if prot in found else "")
+            row.append(str(len(found)))
+            char_rows_out.append(row)
 
     _write_tsv(
-        [char_headers] + char_rows_out,
+        [char_headers_out] + char_rows_out,
         report_dir / "characterized_og_matrix.tsv",
     )
     _write_html_table(
-        char_headers,
+        char_headers_out,
         char_rows_out,
         report_dir / "characterized_og_matrix.html",
         f"Characterized Genes x Orthogroups — {family_id}",
     )
 
     # Report 2: Portal × OG (gene counts, only OGs with characterized genes)
-    portal_headers = ["orthogroup"] + portals + ["total_genes"]
-    portal_rows_out: list[list[str]] = []
-    for og_id in og_ids:
-        genes = og_data[og_id]
-        row = [og_id]
-        total = 0
+    if vertical:
+        # Rows = portals, Columns = OGs
+        portal_headers_out = ["portal"] + og_ids + ["total_genes"]
+        portal_rows_out: list[list[str]] = []
         for portal in portals:
-            count = len(genes.get(portal, []))
-            total += count
-            row.append(str(count))
-        row.append(str(total))
-        portal_rows_out.append(row)
+            row = [portal]
+            total = 0
+            for og_id in og_ids:
+                count = len(og_data[og_id].get(portal, []))
+                total += count
+                row.append(str(count))
+            row.append(str(total))
+            portal_rows_out.append(row)
+    else:
+        # Rows = OGs, Columns = portals (horizontal, original)
+        portal_headers_out = ["orthogroup"] + portals + ["total_genes"]
+        portal_rows_out = []
+        for og_id in og_ids:
+            genes = og_data[og_id]
+            row = [og_id]
+            total = 0
+            for portal in portals:
+                count = len(genes.get(portal, []))
+                total += count
+                row.append(str(count))
+            row.append(str(total))
+            portal_rows_out.append(row)
 
     _write_tsv(
-        [portal_headers] + portal_rows_out,
+        [portal_headers_out] + portal_rows_out,
         report_dir / "portal_og_matrix.tsv",
     )
     _write_html_table(
-        portal_headers,
+        portal_headers_out,
         portal_rows_out,
         report_dir / "portal_og_matrix.html",
         f"Portal Gene Counts x Orthogroups — {family_id}",
@@ -301,7 +358,7 @@ def og_report_command(
             "event": "protsetphylo_og_report",
             "family_id": family_id,
             "run_id": run_id,
-            "n_characterized": len(short_names),
+            "n_characterized": len(char_proteins),
             "n_total_ogs": len(og_data),
             "n_ogs_with_char": len(og_ids),
             "report_dir": str(report_dir),
