@@ -92,6 +92,7 @@ def init_command(
     ),
     pfam: list[str] | None = typer.Option(None, "--pfam", help="Target Pfam accession (repeatable)"),
     pfam_list: Path | None = typer.Option(None, "--pfam-list", help="File with one Pfam accession per line"),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing family (deletes directory and DB row)"),
 ) -> None:
     """Initialize a gene family for phylogenomic analysis."""
     project_dir = project_dir.expanduser().resolve()
@@ -106,10 +107,21 @@ def init_command(
             "Must start with alphanumeric and contain only [A-Za-z0-9_.-]"
         )
 
-    # Check family doesn't already exist
+    # Check family doesn't already exist (or remove if --force)
     family_dir = paths.family_dir(family_id)
     if family_dir.exists():
-        raise typer.BadParameter(f"Family directory already exists: {family_dir}")
+        if not force:
+            raise typer.BadParameter(
+                f"Family directory already exists: {family_dir} (use --force to overwrite)"
+            )
+        shutil.rmtree(family_dir)
+        conn = connect(paths.db_path)
+        try:
+            conn.execute("DELETE FROM families WHERE family_id = ?", (family_id,))
+            conn.commit()
+        finally:
+            conn.close()
+        typer.echo(f"Removed existing family: {family_id}")
 
     # Collect Pfam accessions
     pfam_accessions: list[str] = []
