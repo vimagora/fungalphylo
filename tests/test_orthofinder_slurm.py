@@ -54,13 +54,13 @@ def _seed_staging(paths: ProjectPaths, staging_id: str, n_proteomes: int = 3) ->
         conn.close()
 
 
-def _write_tools_yaml(paths: ProjectPaths, *, env_activate: str = "") -> None:
+def _write_tools_yaml(paths: ProjectPaths, *, env_path: str = "") -> None:
     paths.tools_yaml.write_text(
         "busco:\n"
         '  bin_dir: ""\n'
         '  command: "busco"\n'
         "orthofinder:\n"
-        f"  env_activate: {json.dumps(env_activate)}\n"
+        f"  env_path: {json.dumps(env_path)}\n"
         '  command: "orthofinder"\n'
         '  msa_program: "mafft"\n',
         encoding="utf-8",
@@ -103,13 +103,12 @@ def test_orthofinder_slurm_writes_script_for_latest_staging(tmp_path: Path, monk
     assert f'-f "{proteomes_dir.as_posix()}"' in script
     results_dir = project_dir / "runs" / "of_test" / "orthofinder_results"
     assert f'-o "{results_dir.as_posix()}"' in script
-    assert "-A mafft" in script
+    assert "-M msa" in script
     assert "--time=48:00:00" in script
     assert "--cpus-per-task=16" in script
     assert "--mem-per-cpu=4G" in script
-    assert "module purge" not in script  # no env_activate configured
-    assert "module load mafft" in script  # MSA tool always loaded
-    assert "WARNING" in result.output  # warns about missing env_activate
+    assert "module load mafft" in script
+    assert "WARNING" in result.output  # warns about missing env_path
     assert manifest["kind"] == "orthofinder"
     assert manifest["source_kind"] == "staging"
     assert manifest["source_id"] == "stg_new"
@@ -130,15 +129,14 @@ def test_orthofinder_slurm_writes_script_for_latest_staging(tmp_path: Path, monk
     assert row["kind"] == "orthofinder"
 
 
-def test_orthofinder_slurm_with_env_activate(tmp_path: Path, monkeypatch) -> None:
+def test_orthofinder_slurm_with_env_path(tmp_path: Path, monkeypatch) -> None:
     project_dir = tmp_path / "project"
     paths = _init_project(project_dir)
     _seed_staging(paths, "stg1")
 
-    env_path = tmp_path / "of_env" / "bin" / "activate"
-    env_path.parent.mkdir(parents=True)
-    env_path.write_text("# activate\n", encoding="utf-8")
-    _write_tools_yaml(paths, env_activate=str(env_path))
+    tykky_bin = tmp_path / "of2_tykky" / "bin"
+    tykky_bin.mkdir(parents=True)
+    _write_tools_yaml(paths, env_path=str(tykky_bin))
 
     monkeypatch.setattr(
         "fungalphylo.cli.commands.orthofinder_slurm.subprocess.run",
@@ -157,11 +155,10 @@ def test_orthofinder_slurm_with_env_activate(tmp_path: Path, monkeypatch) -> Non
     assert result.exit_code == 0, result.output
 
     script = (project_dir / "runs/of_env/slurm/orthofinder.sbatch").read_text(encoding="utf-8")
-    assert "module purge" in script
-    assert "module load StdEnv" in script
-    assert "module load python-data" in script
-    assert f'source "{env_path.resolve().as_posix()}"' in script
+    assert f'export PATH="{tykky_bin.resolve().as_posix()}:$PATH"' in script
     assert "module load mafft" in script
+    assert "module purge" not in script
+    assert "source" not in script
 
 
 def test_orthofinder_slurm_with_family_id(tmp_path: Path, monkeypatch) -> None:
@@ -393,7 +390,7 @@ def test_orthofinder_slurm_custom_msa_program(tmp_path: Path, monkeypatch) -> No
     assert result.exit_code == 0, result.output
 
     script = (project_dir / "runs/of_msa/slurm/orthofinder.sbatch").read_text(encoding="utf-8")
-    assert "-A muscle" in script
+    assert "-M msa" in script
 
     manifest = json.loads(
         (project_dir / "runs/of_msa/manifest.json").read_text(encoding="utf-8")
@@ -425,11 +422,9 @@ def test_orthofinder_slurm_og_only_flag(tmp_path: Path, monkeypatch) -> None:
     assert result.exit_code == 0, result.output
 
     script = (project_dir / "runs/of_og/slurm/orthofinder.sbatch").read_text(encoding="utf-8")
-    assert "-M dendroblast" in script
+    assert " -os" in script
     assert '-o "' in script  # output dir is set
-    assert "-A mafft" not in script
-    assert "dendroblast (orthogroups only)" in script
-    assert "MSA program" not in script
+    assert "orthogroups + sequences only" in script
 
     manifest = json.loads(
         (project_dir / "runs/of_og/manifest.json").read_text(encoding="utf-8")
@@ -460,9 +455,9 @@ def test_orthofinder_slurm_og_only_not_set_by_default(tmp_path: Path, monkeypatc
     assert result.exit_code == 0, result.output
 
     script = (project_dir / "runs/of_no_og/slurm/orthofinder.sbatch").read_text(encoding="utf-8")
-    assert "-M dendroblast" not in script
-    assert "-A mafft" in script
-    assert "msa (MSA program: mafft)" in script
+    assert "-os" not in script
+    assert "-M msa" in script
+    assert "msa (full pipeline)" in script
 
     manifest = json.loads(
         (project_dir / "runs/of_no_og/manifest.json").read_text(encoding="utf-8")

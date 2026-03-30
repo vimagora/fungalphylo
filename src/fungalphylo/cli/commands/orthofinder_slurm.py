@@ -45,34 +45,31 @@ def _render_orthofinder_script(
     project_dir: Path,
     input_dir: Path,
     results_dir: Path,
-    env_activate: Path | None,
+    env_path: Path | None,
     of_cmd: str,
     msa_program: str,
     resume_from: Path | None,
     og_only: bool,
 ) -> str:
-    # Environment setup: module purge → StdEnv → python-data → source env → load MSA tool
-    if env_activate is not None:
+    # Environment setup: export Tykky/bin PATH + load mafft module
+    if env_path is not None:
         env_lines = (
-            "module purge\n"
-            "module load StdEnv\n"
-            "module load python-data\n"
-            f'source "{env_activate.as_posix()}"\n'
-            f"module load {msa_program}\n"
+            f'export PATH="{env_path.as_posix()}:$PATH"\n'
+            "module load mafft\n"
         )
     else:
         env_lines = (
-            "# No env_activate configured; assuming orthofinder is on PATH\n"
-            f"module load {msa_program}\n"
+            "# No env_path configured; assuming orthofinder is on PATH\n"
+            "module load mafft\n"
         )
 
     # OrthoFinder command
-    # When og_only: use -M dendroblast to skip MSA/gene trees entirely.
-    # Orthogroups are assigned by MCL before MSA, so results are identical.
+    # Default: -M msa with -os (stop after orthogroup sequences, skip tree inference)
+    # Full: -M msa without -os (runs full pipeline including species tree)
     if og_only:
-        msa_opts = " -M dendroblast"
+        msa_opts = " -os"
     else:
-        msa_opts = f" -A {msa_program}"
+        msa_opts = " -M msa"
 
     if resume_from is not None:
         of_invocation = (
@@ -112,7 +109,7 @@ THREADS="${{SLURM_CPUS_PER_TASK:-1}}"
 echo "Running OrthoFinder"
 echo "Input dir:   {input_dir.as_posix()}"
 echo "Results dir: {results_dir.as_posix()}"
-echo "Mode:        {'dendroblast (orthogroups only)' if og_only else f'msa (MSA program: {msa_program})'}"
+echo "Mode:        {'msa -os (orthogroups + sequences only)' if og_only else 'msa (full pipeline)'}"
 echo "Threads:     $THREADS"
 
 {of_invocation}
@@ -231,7 +228,7 @@ def orthofinder_slurm_command(
     ),
     og_only: bool = typer.Option(
         False, "--og-only",
-        help="Use -M dendroblast to skip MSA/gene trees (orthogroups are identical).",
+        help="Add -os to stop after writing orthogroup sequences (skip tree inference).",
     ),
     submit: bool = typer.Option(False, "--submit", help="Submit with sbatch after writing script"),
 ) -> None:
@@ -273,12 +270,12 @@ def orthofinder_slurm_command(
         if not og_only:
             og_only = bool(manifest_data.get("orthofinder", {}).get("og_only", False))
 
-        # Resolve env_activate from manifest or tools.yaml
-        manifest_env = manifest_data.get("orthofinder", {}).get("env_activate")
+        # Resolve env_path from manifest or tools.yaml
+        manifest_env = manifest_data.get("orthofinder", {}).get("env_path")
         if manifest_env:
-            env_activate = Path(str(manifest_env)).expanduser().resolve()
+            env_path = Path(str(manifest_env)).expanduser().resolve()
         else:
-            env_activate = tools.orthofinder.env_activate
+            env_path = tools.orthofinder.env_path
 
         # SLURM params: CLI wins, then manifest, then defaults
         time = time or str(manifest_data.get("slurm", {}).get("time") or "48:00:00")
@@ -334,10 +331,10 @@ def orthofinder_slurm_command(
 
         of_cmd = tools.orthofinder.command
         selected_msa = msa_program or tools.orthofinder.msa_program
-        env_activate = tools.orthofinder.env_activate
-        if env_activate is None:
+        env_path = tools.orthofinder.env_path
+        if env_path is None:
             typer.echo(
-                "WARNING: orthofinder.env_activate not set in tools.yaml. "
+                "WARNING: orthofinder.env_path not set in tools.yaml. "
                 "The generated script will assume orthofinder is on PATH."
             )
         rid = run_id or f"orthofinder_{now_tag()}"
@@ -378,7 +375,7 @@ def orthofinder_slurm_command(
         project_dir=project_dir,
         input_dir=resolved_input_dir,
         results_dir=results_dir,
-        env_activate=env_activate,
+        env_path=env_path,
         of_cmd=of_cmd,
         msa_program=selected_msa,
         resume_from=resume_from,
@@ -404,7 +401,7 @@ def orthofinder_slurm_command(
             },
             "orthofinder": {
                 "command": of_cmd,
-                "env_activate": str(env_activate) if env_activate else None,
+                "env_path": str(env_path) if env_path else None,
                 "msa_program": selected_msa,
                 "og_only": og_only,
             },

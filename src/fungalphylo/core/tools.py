@@ -30,12 +30,12 @@ iqtree:
   # IQ-TREE phylogenetic tree builder. On Puhti: module load iqtree
   command: "iqtree2"
 orthofinder:
-  # Path to the OrthoFinder virtual environment activate script.
-  # On Puhti: module purge + module load StdEnv + module load python-data + source env
-  env_activate: ""
+  # Directory containing the OrthoFinder executable (e.g. Tykky container bin/).
+  # The generated SLURM script will prepend this to PATH.
+  env_path: ""
   # Optional: executable name (default: "orthofinder")
   command: "orthofinder"
-  # MSA program for gene trees (default: "mafft"; famsa may crash on some systems)
+  # MSA program for gene trees (default: "mafft")
   msa_program: "mafft"
 hmmer:
   # HMMER tools for HMM-based sequence placement. On Puhti: module load biokit
@@ -88,7 +88,7 @@ class BlastTool:
 
 @dataclass(frozen=True)
 class OrthoFinderTool:
-    env_activate: Path | None = None
+    env_path: Path | None = None
     command: str = "orthofinder"
     msa_program: str = "mafft"
 
@@ -167,7 +167,7 @@ def load_tools(project_dir: Path) -> ToolsConfig:
     blastp_cmd = (blast_data.get("blastp_cmd") or "blastp").strip() or "blastp"
 
     of_data = data.get("orthofinder") or {}
-    of_env_raw = (of_data.get("env_activate") or "").strip()
+    of_env_raw = (of_data.get("env_path") or "").strip()
     of_env = Path(of_env_raw).expanduser().resolve() if of_env_raw else None
     of_cmd = (of_data.get("command") or "orthofinder").strip() or "orthofinder"
     of_msa = (of_data.get("msa_program") or "mafft").strip() or "mafft"
@@ -186,7 +186,7 @@ def load_tools(project_dir: Path) -> ToolsConfig:
         iqtree=IqtreeTool(bin_dir=iqtree_bin_dir, command=iqtree_cmd),
         fasttree=FasttreeTool(bin_dir=fasttree_bin_dir, command=fasttree_cmd),
         blast=BlastTool(bin_dir=blast_bin_dir, makeblastdb_cmd=makeblastdb_cmd, blastp_cmd=blastp_cmd),
-        orthofinder=OrthoFinderTool(env_activate=of_env, command=of_cmd, msa_program=of_msa),
+        orthofinder=OrthoFinderTool(env_path=of_env, command=of_cmd, msa_program=of_msa),
         hmmer=HmmerTool(bin_dir=hmmer_bin_dir, hmmbuild_cmd=hmmbuild_cmd, hmmsearch_cmd=hmmsearch_cmd),
     )
 
