@@ -311,3 +311,179 @@ def test_og_apply_missing_og_warns(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "WARNING" in result.output
     assert "Copied 1 OGs" in result.output
+
+
+def test_og_report_includes_placements(tmp_path: Path) -> None:
+    """og-report should include standalone genes from placements.tsv."""
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+    _seed_characterized(paths, "mfs_placed")
+
+    portals = ["SpA.faa", "SpB.faa"]
+    orthogroups = {
+        "OG0000001": {
+            "SpA.faa": ["SpA|SUT1"],
+            "SpB.faa": ["SpB|SUT2"],
+        },
+        "OG0000002": {
+            "SpA.faa": ["SpA|other"],
+            "SpB.faa": ["SpB|other2"],
+        },
+    }
+    _seed_orthofinder_run(paths, "of_placed", portals, orthogroups)
+
+    # Write placements.tsv — OutSp|SUT3 placed into OG0000002
+    place_dir = paths.family_dir("mfs_placed") / "place_standalone"
+    place_dir.mkdir(parents=True)
+    (place_dir / "placements.tsv").write_text(
+        "sequence\tbest_og\tevalue\tscore\n"
+        "OutSp|SUT3\tOG0000002\t1e-20\t100\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "protsetphylo", "og-report",
+            "--family-id", "mfs_placed",
+            "--run-id", "of_placed",
+            str(project_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Loaded 1 standalone placements" in result.output
+    # Both OG0000001 (from Orthogroups.tsv) and OG0000002 (from placements) should appear
+    assert "OGs with characterized genes: 2" in result.output
+
+    # Verify OG0000002 row in characterized matrix
+    with (paths.family_og_report_dir("mfs_placed") / "characterized_og_matrix.tsv").open(
+        encoding="utf-8"
+    ) as fh:
+        rows = list(csv.DictReader(fh, delimiter="\t"))
+    og_ids = [r["orthogroup"] for r in rows]
+    assert "OG0000001" in og_ids
+    assert "OG0000002" in og_ids
+
+
+def test_og_report_no_placed_flag_skips_placements(tmp_path: Path) -> None:
+    """--no-placed should ignore placements.tsv."""
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+    _seed_characterized(paths, "mfs_nopl")
+
+    portals = ["SpA.faa", "SpB.faa"]
+    orthogroups = {
+        "OG0000001": {
+            "SpA.faa": ["SpA|SUT1"],
+            "SpB.faa": ["SpB|SUT2"],
+        },
+    }
+    _seed_orthofinder_run(paths, "of_nopl", portals, orthogroups)
+
+    # Write placements that would add OG0000002 if loaded
+    place_dir = paths.family_dir("mfs_nopl") / "place_standalone"
+    place_dir.mkdir(parents=True)
+    (place_dir / "placements.tsv").write_text(
+        "sequence\tbest_og\tevalue\tscore\n"
+        "OutSp|SUT3\tOG0000002\t1e-20\t100\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "protsetphylo", "og-report",
+            "--family-id", "mfs_nopl",
+            "--run-id", "of_nopl",
+            "--no-placed",
+            str(project_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Loaded" not in result.output  # should not load placements
+    assert "OGs with characterized genes: 1" in result.output
+
+
+def test_og_apply_prefers_og_placed(tmp_path: Path) -> None:
+    """og-apply should prefer og_placed/ over Orthogroup_Sequences/."""
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+    _seed_characterized(paths, "mfs_pref")
+
+    portals = ["SpA.faa"]
+    orthogroups = {"OG0000001": {"SpA.faa": ["SpA|g1"]}}
+    _seed_orthofinder_run(paths, "of_pref", portals, orthogroups)
+
+    # Create og_placed/ with extra content (simulating placed standalone)
+    og_placed = paths.family_og_placed_dir("mfs_pref")
+    og_placed.mkdir(parents=True)
+    (og_placed / "OG0000001.fa").write_text(
+        ">SpA|g1\nMPEPTIDE\n>OutSp|SUT3\nMPEPTIDE\n",
+        encoding="utf-8",
+    )
+
+    report_dir = paths.family_og_report_dir("mfs_pref")
+    report_dir.mkdir(parents=True)
+    (report_dir / "og_decisions.txt").write_text(
+        "include: OG0000001\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "protsetphylo", "og-apply",
+            "--family-id", "mfs_pref",
+            "--run-id", "of_pref",
+            str(project_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Using placed OGs" in result.output
+
+    # Output should have the placed content (with standalone gene)
+    out = (paths.family_og_selected_dir("mfs_pref") / "OG0000001.fa").read_text(encoding="utf-8")
+    assert "OutSp|SUT3" in out
+
+
+def test_og_apply_no_placed_uses_orthogroup_sequences(tmp_path: Path) -> None:
+    """--no-placed forces reading from Orthogroup_Sequences/."""
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+    _seed_characterized(paths, "mfs_nopref")
+
+    portals = ["SpA.faa"]
+    orthogroups = {"OG0000001": {"SpA.faa": ["SpA|g1"]}}
+    _seed_orthofinder_run(paths, "of_nopref", portals, orthogroups)
+
+    # Create og_placed/ with extra content
+    og_placed = paths.family_og_placed_dir("mfs_nopref")
+    og_placed.mkdir(parents=True)
+    (og_placed / "OG0000001.fa").write_text(
+        ">SpA|g1\nMPEPTIDE\n>OutSp|SUT3\nMPEPTIDE\n",
+        encoding="utf-8",
+    )
+
+    report_dir = paths.family_og_report_dir("mfs_nopref")
+    report_dir.mkdir(parents=True)
+    (report_dir / "og_decisions.txt").write_text(
+        "include: OG0000001\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "protsetphylo", "og-apply",
+            "--family-id", "mfs_nopref",
+            "--run-id", "of_nopref",
+            "--no-placed",
+            str(project_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Using placed OGs" not in result.output
+
+    # Output should NOT have the standalone gene
+    out = (paths.family_og_selected_dir("mfs_nopref") / "OG0000001.fa").read_text(encoding="utf-8")
+    assert "OutSp|SUT3" not in out

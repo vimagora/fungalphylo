@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -15,6 +16,47 @@ from fungalphylo.db.db import init_db
 app = typer.Typer()
 
 
+def _find_of_og_sequences_dir(results_root: Path) -> Path:
+    """Find the Orthogroup_Sequences directory inside OrthoFinder results."""
+    candidates = sorted(results_root.glob("Results_*"), reverse=True)
+    for c in candidates:
+        og_seq = c / "Orthogroup_Sequences"
+        if og_seq.is_dir():
+            return og_seq
+    raise typer.BadParameter(
+        f"No OrthoFinder Results_* with Orthogroup_Sequences/ found in {results_root}"
+    )
+
+
+def _resolve_of_root(
+    paths: ProjectPaths,
+    run_id: str | None,
+    results_dir: Path | None,
+) -> tuple[Path, str | None]:
+    """Resolve OrthoFinder results root. Returns (of_root, resolved_run_id)."""
+    if results_dir is not None:
+        return results_dir.expanduser().resolve(), run_id
+    if run_id is not None:
+        return paths.run_dir(run_id) / "orthofinder_results", run_id
+    # Auto-detect latest
+    candidates = []
+    for manifest_path in paths.runs_root.glob("*/manifest.json"):
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if data.get("kind") == "orthofinder":
+                candidates.append((data.get("created_at", ""), data["run_id"]))
+        except (json.JSONDecodeError, KeyError):
+            continue
+    if not candidates:
+        raise typer.BadParameter(
+            "No OrthoFinder runs found. Provide --run-id or --results-dir."
+        )
+    candidates.sort(reverse=True)
+    resolved = candidates[0][1]
+    typer.echo(f"Using OrthoFinder run: {resolved}")
+    return paths.run_dir(resolved) / "orthofinder_results", resolved
+
+
 def _render_place_script(
     *,
     acct: str,
@@ -24,7 +66,8 @@ def _render_place_script(
     cpus: int,
     mem_per_cpu: str,
     partition: str,
-    og_selected_dir: Path,
+    og_sequences_dir: Path,
+    og_placed_dir: Path,
     standalone_dir: Path,
     work_dir: Path,
     bin_export: str,
@@ -50,19 +93,23 @@ module load biokit
 {bin_export}
 THREADS="${{SLURM_CPUS_PER_TASK:-1}}"
 
-OG_DIR="{og_selected_dir.as_posix()}"
+OG_SRC="{og_sequences_dir.as_posix()}"
+OG_PLACED="{og_placed_dir.as_posix()}"
 STANDALONE_DIR="{standalone_dir.as_posix()}"
 WORK="{work_dir.as_posix()}"
 EVALUE="{evalue}"
 
-mkdir -p "$WORK/alignments" "$WORK/profiles"
+mkdir -p "$WORK/alignments" "$WORK/profiles" "$OG_PLACED"
+
+# Copy all OG FASTAs to og_placed/ (working copies)
+cp "$OG_SRC"/*.fa "$OG_PLACED/" 2>/dev/null || true
 
 # Concatenate all standalone FASTAs
 STANDALONE_FASTA="$WORK/standalone_all.faa"
 cat "$STANDALONE_DIR"/*.faa > "$STANDALONE_FASTA"
 
 N_STANDALONE=$(grep -c '^>' "$STANDALONE_FASTA" || true)
-N_OGS=$(ls "$OG_DIR"/*.fa 2>/dev/null | wc -l || true)
+N_OGS=$(ls "$OG_PLACED"/*.fa 2>/dev/null | wc -l || true)
 
 echo "=== place-standalone ==="
 echo "OGs:                $N_OGS"
@@ -76,13 +123,13 @@ if [ "$N_STANDALONE" -eq 0 ]; then
 fi
 
 if [ "$N_OGS" -eq 0 ]; then
-  echo "No OG FASTAs found in $OG_DIR. Nothing to do."
+  echo "No OG FASTAs found. Nothing to do."
   exit 0
 fi
 
 # Step 1: Align each OG and build HMM profile
 echo "--- Building HMM profiles ---"
-for OG_FASTA in "$OG_DIR"/*.fa; do
+for OG_FASTA in "$OG_PLACED"/*.fa; do
   OG_NAME=$(basename "$OG_FASTA" .fa)
   ALN="$WORK/alignments/$OG_NAME.aln"
   HMM="$WORK/profiles/$OG_NAME.hmm"
@@ -118,16 +165,12 @@ awk '!/^#/ {{ print $1, $3, $5, $6 }}' "$RESULTS" | \\
   sort -k2,2 -k3,3g | \\
   awk '!seen[$2]++ {{ print $2 "\\t" $1 "\\t" $3 "\\t" $4 }}' >> "$PLACEMENTS"
 
-# Step 5: Append each standalone sequence to its best OG
+# Step 5: Append each standalone sequence to its best OG in og_placed/
 echo "--- Appending sequences ---"
 APPENDED=0
 while IFS=$'\\t' read -r SEQ_ID BEST_OG SEQ_EVAL SEQ_SCORE; do
   [ "$SEQ_ID" = "sequence" ] && continue
-  OG_FASTA="$OG_DIR/$BEST_OG.fa"
-  if [ ! -f "$OG_FASTA" ]; then
-    # Could be a merged OG
-    OG_FASTA="$OG_DIR/merge_$BEST_OG.fa"
-  fi
+  OG_FASTA="$OG_PLACED/$BEST_OG.fa"
   if [ -f "$OG_FASTA" ]; then
     # Extract the sequence from the standalone FASTA and append
     awk -v id="$SEQ_ID" '
@@ -152,6 +195,14 @@ echo "Placements report: $PLACEMENTS"
 def place_standalone_command(
     project_dir: Path = typer.Argument(..., help="Project directory."),
     family_id: str = typer.Option(..., "--family-id", help="Gene family identifier."),
+    run_id: str | None = typer.Option(
+        None, "--run-id",
+        help="OrthoFinder run ID (default: auto-detect latest).",
+    ),
+    results_dir: Path | None = typer.Option(
+        None, "--results-dir",
+        help="Explicit path to OrthoFinder results root.",
+    ),
     time: str | None = typer.Option(None, "--time", help="SLURM time (default: 02:00:00)"),
     cpus: int | None = typer.Option(None, "--cpus", help="CPUs per task (default: 8)"),
     mem_per_cpu: str | None = typer.Option(None, "--mem-per-cpu", help="Memory per CPU (default: 2G)"),
@@ -168,25 +219,27 @@ def place_standalone_command(
 
     tools = load_tools(project_dir)
 
-    # Verify directories exist
-    og_selected_dir = paths.family_og_selected_dir(family_id)
-    standalone_dir = paths.family_selected_dir(family_id) / "standalone"
+    # Resolve OrthoFinder results
+    of_root, run_id = _resolve_of_root(paths, run_id, results_dir)
+    if not of_root.is_dir():
+        raise typer.BadParameter(f"Results directory does not exist: {of_root}")
+    og_sequences_dir = _find_of_og_sequences_dir(of_root)
 
-    if not og_selected_dir.is_dir():
-        raise typer.BadParameter(
-            f"OG selected directory not found: {og_selected_dir}\n"
-            f"Run `protsetphylo og-apply --family-id {family_id}` first."
-        )
+    # Verify standalone directory exists
+    standalone_dir = paths.family_selected_dir(family_id) / "standalone"
     if not standalone_dir.is_dir() or not any(standalone_dir.glob("*.faa")):
         raise typer.BadParameter(
             f"No standalone FASTAs found in: {standalone_dir}\n"
             "Nothing to place — all characterized genes may have portal IDs."
         )
 
-    og_files = sorted(og_selected_dir.glob("*.fa"))
+    og_files = sorted(og_sequences_dir.glob("*.fa"))
     standalone_files = sorted(standalone_dir.glob("*.faa"))
     if not og_files:
-        raise typer.BadParameter(f"No .fa files in {og_selected_dir}")
+        raise typer.BadParameter(f"No .fa files in {og_sequences_dir}")
+
+    # Output directory
+    og_placed_dir = paths.family_og_placed_dir(family_id)
 
     # Account
     inferred = infer_account_from_project_dir(project_dir)
@@ -230,7 +283,8 @@ def place_standalone_command(
         cpus=cpus,
         mem_per_cpu=mem_per_cpu,
         partition=partition,
-        og_selected_dir=og_selected_dir,
+        og_sequences_dir=og_sequences_dir,
+        og_placed_dir=og_placed_dir,
         standalone_dir=standalone_dir,
         work_dir=work_dir,
         bin_export=bin_export,
@@ -249,6 +303,8 @@ def place_standalone_command(
     typer.echo(f"Wrote place-standalone SLURM script: {script_path}")
     typer.echo(f"OGs to profile:      {len(og_files)}")
     typer.echo(f"Standalone files:    {len(standalone_files)} ({n_standalone} sequences)")
+    typer.echo(f"OG source:           {og_sequences_dir}")
+    typer.echo(f"OG placed output:    {og_placed_dir}")
     typer.echo(f"Work directory:      {work_dir}")
 
     log_event(
@@ -257,9 +313,12 @@ def place_standalone_command(
             "ts": now_iso(),
             "event": "protsetphylo_place_standalone",
             "family_id": family_id,
+            "run_id": run_id,
             "n_ogs": len(og_files),
             "n_standalone_files": len(standalone_files),
             "n_standalone_seqs": n_standalone,
+            "og_sequences_dir": str(og_sequences_dir),
+            "og_placed_dir": str(og_placed_dir),
             "script_path": str(script_path),
             "account": acct,
             "submit": submit,

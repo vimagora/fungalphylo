@@ -91,6 +91,10 @@ def og_apply_command(
         None, "--decisions",
         help="Path to edited decision template (default: og_report/og_decisions.txt).",
     ),
+    no_placed: bool = typer.Option(
+        False, "--no-placed",
+        help="Ignore og_placed/ and read from Orthogroup_Sequences/ directly.",
+    ),
 ) -> None:
     project_dir = project_dir.expanduser().resolve()
     paths = ProjectPaths(project_dir)
@@ -140,8 +144,16 @@ def og_apply_command(
     if not of_root.is_dir():
         raise typer.BadParameter(f"Results directory does not exist: {of_root}")
 
-    of_results = _find_of_results_dir(of_root)
-    og_seq_dir = of_results / "Orthogroup_Sequences"
+    # Prefer og_placed/ (has standalone genes appended) unless --no-placed
+    og_placed_dir = paths.family_og_placed_dir(family_id)
+    if not no_placed and og_placed_dir.is_dir() and any(og_placed_dir.glob("*.fa")):
+        og_seq_dir = og_placed_dir
+        typer.echo(f"Using placed OGs from: {og_placed_dir}")
+    else:
+        of_results = _find_of_results_dir(of_root)
+        og_seq_dir = of_results / "Orthogroup_Sequences"
+        if not no_placed and not og_placed_dir.is_dir():
+            typer.echo("No og_placed/ found — using Orthogroup_Sequences/ directly")
 
     # Output directory
     out_dir = paths.family_og_selected_dir(family_id)

@@ -57,13 +57,30 @@ def _load_characterized(char_tsv: Path) -> list[dict[str, str]]:
         return list(reader)
 
 
+def _load_placements(placements_tsv: Path) -> dict[str, str]:
+    """Load placements.tsv → {sequence_header: best_og}."""
+    placements: dict[str, str] = {}
+    if not placements_tsv.is_file():
+        return placements
+    with placements_tsv.open(encoding="utf-8") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        for row in reader:
+            seq = row.get("sequence", "").strip()
+            og = row.get("best_og", "").strip()
+            if seq and og:
+                placements[seq] = og
+    return placements
+
+
 def _match_characterized_to_ogs(
     og_data: dict[str, dict[str, list[str]]],
     char_rows: list[dict[str, str]],
+    placements: dict[str, str] | None = None,
 ) -> dict[str, set[str]]:
     """Return {og_id: {header, ...}} for OGs containing characterized genes.
 
     Matches characterized headers (short_name|protein_name) against gene IDs in OGs.
+    Also incorporates HMM placements for standalone genes if provided.
     """
     # Build set of characterized headers
     char_header_set: set[str] = set()
@@ -74,6 +91,7 @@ def _match_characterized_to_ogs(
             char_header_set.add(f"{sn}|{pn}")
 
     og_char: dict[str, set[str]] = {}
+    # Match from Orthogroups.tsv
     for og_id, portal_genes in og_data.items():
         found: set[str] = set()
         for gene_list in portal_genes.values():
@@ -82,6 +100,13 @@ def _match_characterized_to_ogs(
                     found.add(gene_id)
         if found:
             og_char[og_id] = found
+
+    # Merge HMM placements for standalone genes
+    if placements:
+        for seq_header, og_id in placements.items():
+            if seq_header in char_header_set:
+                og_char.setdefault(og_id, set()).add(seq_header)
+
     return og_char
 
 
@@ -175,6 +200,10 @@ def og_report_command(
         "horizontal", "--orientation",
         help="Table orientation: horizontal (OGs as rows) or vertical (OGs as columns).",
     ),
+    no_placed: bool = typer.Option(
+        False, "--no-placed",
+        help="Ignore place-standalone placements (use only Orthogroups.tsv data).",
+    ),
 ) -> None:
     if orientation not in ("horizontal", "vertical"):
         raise typer.BadParameter(
@@ -243,9 +272,18 @@ def og_report_command(
     if not og_tsv.is_file():
         raise typer.BadParameter(f"Missing Orthogroups.tsv: {og_tsv}")
 
+    # Load HMM placements if available
+    placements: dict[str, str] | None = None
+    if not no_placed:
+        placements_tsv = paths.family_dir(family_id) / "place_standalone" / "placements.tsv"
+        loaded = _load_placements(placements_tsv)
+        if loaded:
+            placements = loaded
+            typer.echo(f"Loaded {len(loaded)} standalone placements from {placements_tsv}")
+
     # Parse and match
     portals, og_data = _parse_orthogroups_tsv(og_tsv)
-    og_char = _match_characterized_to_ogs(og_data, char_rows)
+    og_char = _match_characterized_to_ogs(og_data, char_rows, placements)
 
     if not og_char:
         typer.echo("No orthogroups contain characterized genes.")

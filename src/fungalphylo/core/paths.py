@@ -168,6 +168,9 @@ class ProjectPaths:
     def family_og_report_dir(self, family_id: str) -> Path:
         return self.family_dir(family_id) / "og_report"
 
+    def family_og_placed_dir(self, family_id: str) -> Path:
+        return self.family_dir(family_id) / "og_placed"
+
     def family_og_selected_dir(self, family_id: str) -> Path:
         return self.family_dir(family_id) / "og_selected"
 

@@ -337,13 +337,13 @@ Analyze specific gene families (e.g., MFS sugar transporters) across your staged
 ### Pipeline
 
 ```
-protsetphylo init → interproscan → select → orthofinder-slurm → og-report → og-apply → [place-standalone] → phylo-slurm
+protsetphylo init → interproscan → select → orthofinder-slurm → [place-standalone] → og-report → og-apply → phylo-slurm
                                       ↓
                               (optional quick path)
                           build-fasta → MMseqs2/CD-HIT → align → tree
 ```
 
-The recommended path uses OrthoFinder on the per-species FASTAs from `select`, then `og-report` to inspect orthogroups containing characterized genes, `og-apply` to select/merge OGs, and `phylo-slurm` for parallel MAFFT → trimAl → IQ-TREE. The optional quick path uses `build-fasta` with clustering for fast exploratory analysis.
+The recommended path uses OrthoFinder on the per-species FASTAs from `select`. If standalone characterized genes exist (no `portal_id`), `place-standalone` uses HMM profiles to assign them to OGs before reporting. Then `og-report` inspects orthogroups containing characterized genes, `og-apply` selects/merges OGs, and `phylo-slurm` runs parallel MAFFT → trimAl → IQ-TREE. The optional quick path uses `build-fasta` with clustering for fast exploratory analysis.
 
 ### Step-by-step
 
@@ -410,7 +410,26 @@ fungalphylo orthofinder-slurm /path/to/project \
 
 Runs OrthoFinder on `families/mfs_sugar/selected/` to identify orthogroups via MCL clustering.
 
-#### 5. Inspect orthogroups with `og-report`
+#### 5. Place standalone characterized genes (optional)
+
+If some characterized genes have no `portal_id` (e.g., outgroup species), they were excluded from OrthoFinder. Place them into OGs using HMM profiles **before** generating reports:
+
+```bash
+fungalphylo protsetphylo place-standalone /path/to/project \
+  --family-id mfs_sugar --run-id <orthofinder_run_id> \
+  --account project_xxx --submit
+```
+
+Generates a SLURM script that:
+- Copies all OG FASTAs from `Orthogroup_Sequences/` to `families/<family_id>/og_placed/`
+- Aligns each OG with MAFFT, builds HMM profiles with `hmmbuild`
+- Searches standalone sequences against all profiles with `hmmsearch`
+- Appends each sequence to its best-matching OG in `og_placed/`
+- Writes `placements.tsv` report
+
+Requires HMMER (on Puhti: `module load biokit`). Skip this step if all characterized genes have portal IDs.
+
+#### 6. Inspect orthogroups with `og-report`
 
 ```bash
 fungalphylo protsetphylo og-report /path/to/project \
@@ -419,16 +438,20 @@ fungalphylo protsetphylo og-report /path/to/project \
 # Vertical orientation (OGs as columns, portals/proteins as rows)
 fungalphylo protsetphylo og-report /path/to/project \
   --family-id mfs_sugar --orientation vertical
+
+# Ignore placements (only show genes from Orthogroups.tsv)
+fungalphylo protsetphylo og-report /path/to/project \
+  --family-id mfs_sugar --no-placed
 ```
 
 Generates reports in `families/mfs_sugar/og_report/`:
-- `characterized_og_matrix.tsv/.html` — which characterized genes are in which OGs (columns use `portal_id|protein_name` when portal is available)
+- `characterized_og_matrix.tsv/.html` — which characterized genes are in which OGs (columns use `portal_id|protein_name` when portal is available). Includes standalone genes from `placements.tsv` if available.
 - `portal_og_matrix.tsv/.html` — gene counts per portal for OGs with characterized genes (color-coded)
 - `og_decisions.txt` — editable template for selecting/merging OGs
 
 Use `--orientation horizontal` (default) for OGs as rows, or `--orientation vertical` for OGs as columns.
 
-#### 6. Apply OG decisions with `og-apply`
+#### 7. Apply OG decisions with `og-apply`
 
 Edit `og_decisions.txt` to specify which OGs to keep and which to merge:
 
@@ -442,26 +465,15 @@ The above keeps OG0000001 and OG0000005 as-is, merges OG0000002+OG0000003 into o
 ```bash
 fungalphylo protsetphylo og-apply /path/to/project \
   --family-id mfs_sugar --run-id <orthofinder_run_id>
+
+# Force reading from Orthogroup_Sequences/ instead of og_placed/
+fungalphylo protsetphylo og-apply /path/to/project \
+  --family-id mfs_sugar --run-id <orthofinder_run_id> --no-placed
 ```
+
+By default, `og-apply` reads from `og_placed/` (which includes standalone genes) if it exists, otherwise falls back to `Orthogroup_Sequences/`. Use `--no-placed` to force the fallback.
 
 Outputs FASTAs to `families/mfs_sugar/og_selected/`, ready for the next step.
-
-#### 7. Place standalone characterized genes (optional)
-
-If some characterized genes have no `portal_id` (e.g., outgroup species), they were excluded from OrthoFinder. Place them into OGs using HMM profiles:
-
-```bash
-fungalphylo protsetphylo place-standalone /path/to/project \
-  --family-id mfs_sugar --account project_xxx --submit
-```
-
-Generates a SLURM script that:
-- Aligns each OG with MAFFT, builds HMM profiles with `hmmbuild`
-- Searches standalone sequences against all profiles with `hmmsearch`
-- Appends each sequence to its best-matching OG
-- Writes `placements.tsv` report
-
-Requires HMMER (on Puhti: `module load biokit`). Skip this step if all characterized genes have portal IDs.
 
 #### 8. Gene tree inference with `phylo-slurm`
 
@@ -552,15 +564,17 @@ families/<family_id>/
     standalone/                # Characterized genes without portal_id
       <short_name>.faa         # One per outgroup species
     selection_report.tsv       # What was selected and why
-  og_report/                   # OG inspection reports
+  og_placed/                   # OG FASTAs with standalone genes placed (from place-standalone)
+    <OG_ID>.fa                 # Copies from Orthogroup_Sequences/ + appended standalone genes
+  og_report/                   # OG inspection reports (reads placements.tsv if available)
     characterized_og_matrix.*  # Characterized genes x OGs (TSV + HTML)
     portal_og_matrix.*         # Portal gene counts x OGs (TSV + HTML)
     og_decisions.txt           # Editable include/merge template
-  og_selected/                 # OG FASTAs after apply + place-standalone
+  og_selected/                 # OG FASTAs after og-apply (reads from og_placed/ or Orthogroup_Sequences/)
     <OG_ID>.fa                 # Included OGs
     merge_<OG_ID>.fa           # Merged OG groups
   place_standalone/            # HMM placement working directory
-    placements.tsv             # Placement report
+    placements.tsv             # Placement report (read by og-report)
   fasta/                       # Only if using build-fasta quick path
     combined.faa               # Merged/clustered sequences
     combined.pre_dedup.faa     # Pre-dedup backup (if clustering)
@@ -660,6 +674,7 @@ fungalphylo db query /path/to/project "SELECT * FROM families"
 | `--max-concurrent` | phylo-slurm | Max concurrent array tasks (default: 380) |
 | `--og-only` | orthofinder-slurm | Stop after orthogroup sequences (`-M msa -os`) |
 | `--orientation` | protsetphylo og-report | Table orientation: horizontal or vertical |
+| `--no-placed` | protsetphylo og-report, og-apply | Ignore og_placed/ and placements.tsv |
 | `--force` | init, protsetphylo init | Overwrite existing project/family |
 | `--min-single-copy` | filter-orthogroups | Fraction of species with exactly 1 copy (default: 0.75) |
 | `--staging-id` | most compute commands | Target a specific snapshot |
