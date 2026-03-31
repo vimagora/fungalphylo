@@ -160,10 +160,11 @@ echo "--- Parsing placements ---"
 PLACEMENTS="$WORK/placements.tsv"
 echo -e "sequence\\tbest_og\\tevalue\\tscore" > "$PLACEMENTS"
 
-# Extract best hit per target sequence (lowest e-value)
+# tblout columns: $1=target(sequence) $3=query(OG) $5=e-value $6=score
+# Sort by sequence name then e-value, keep best OG per sequence
 awk '!/^#/ {{ print $1, $3, $5, $6 }}' "$RESULTS" | \\
-  sort -k2,2 -k3,3g | \\
-  awk '!seen[$2]++ {{ print $2 "\\t" $1 "\\t" $3 "\\t" $4 }}' >> "$PLACEMENTS"
+  sort -k1,1 -k3,3g | \\
+  awk '!seen[$1]++ {{ print $1 "\\t" $2 "\\t" $3 "\\t" $4 }}' >> "$PLACEMENTS"
 
 # Step 5: Append each standalone sequence to its best OG in og_placed/
 echo "--- Appending sequences ---"
