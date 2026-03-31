@@ -249,18 +249,18 @@ fungalphylo orthofinder-slurm /path/to/project --resume-run-id <run_id> --submit
 fungalphylo orthofinder-slurm /path/to/project --msa-program mafft --submit
 ```
 
-**`--og-only`** uses `-M dendroblast` which skips MSA and gene tree inference. Orthogroup assignments are identical — MCL clustering happens before any MSA step. This avoids OrthoFinder v3's aggressive `--localpair --maxiterate 1000` MAFFT calls that can fail on large orthogroups.
+**`--og-only`** adds `-M msa -os` which stops after writing orthogroup sequences, skipping gene tree and species tree inference. This is the recommended mode when you plan to build gene trees yourself with `phylo-slurm`.
 
-OrthoFinder requires a virtual environment on Puhti. Configure in `tools.yaml`:
+OrthoFinder is installed via Tykky container on Puhti. Configure in `tools.yaml`:
 
 ```yaml
 orthofinder:
-  env_activate: "/scratch/project_xxx/software/of3_env/bin/activate"
+  env_path: "/scratch/project_xxx/software/of2_tykky/bin"
   command: "orthofinder"
   msa_program: "mafft"
 ```
 
-The generated SLURM script handles `module purge` → `module load StdEnv` → `module load python-data` → `source env_activate` → `module load <msa_program>` automatically.
+The generated SLURM script prepends `env_path` to `PATH` and loads `module load mafft` for MSA.
 
 SLURM defaults: 48h, 16 CPUs, `small` partition. Memory scales with proteome count: 4G/cpu for <60 proteomes, 8G/cpu for ≥60. Output in `runs/<run_id>/orthofinder_results/`.
 
@@ -415,12 +415,18 @@ Runs OrthoFinder on `families/mfs_sugar/selected/` to identify orthogroups via M
 ```bash
 fungalphylo protsetphylo og-report /path/to/project \
   --family-id mfs_sugar --run-id <orthofinder_run_id>
+
+# Vertical orientation (OGs as columns, portals/proteins as rows)
+fungalphylo protsetphylo og-report /path/to/project \
+  --family-id mfs_sugar --orientation vertical
 ```
 
 Generates reports in `families/mfs_sugar/og_report/`:
-- `characterized_og_matrix.tsv/.html` — which characterized genes are in which OGs
+- `characterized_og_matrix.tsv/.html` — which characterized genes are in which OGs (columns use `portal_id|protein_name` when portal is available)
 - `portal_og_matrix.tsv/.html` — gene counts per portal for OGs with characterized genes (color-coded)
 - `og_decisions.txt` — editable template for selecting/merging OGs
+
+Use `--orientation horizontal` (default) for OGs as rows, or `--orientation vertical` for OGs as columns.
 
 #### 6. Apply OG decisions with `og-apply`
 
@@ -616,15 +622,15 @@ blast:
   makeblastdb_cmd: "makeblastdb"
   blastp_cmd: "blastp"
 orthofinder:
-  env_activate: "/path/to/of3_env/bin/activate"  # venv activate script
+  env_path: "/path/to/of2_tykky/bin"  # Tykky container bin directory
   command: "orthofinder"
-  msa_program: "mafft"             # famsa may crash on some systems
+  msa_program: "mafft"
 hmmer:
   hmmbuild_cmd: "hmmbuild"         # On Puhti: module load biokit
   hmmsearch_cmd: "hmmsearch"
 ```
 
-When `bin_dir` is set, generated SLURM scripts add `export PATH="<bin_dir>:$PATH"`. When empty, scripts use `module load <tool>` instead. On Puhti, most tools are available via `module load` (e.g., `module load blast` before running `protsetphylo select`).
+When `bin_dir` or `env_path` is set, generated SLURM scripts add `export PATH="<path>:$PATH"`. When empty, scripts use `module load <tool>` instead. On Puhti, most tools are available via `module load` (e.g., `module load blast` before running `protsetphylo select`).
 
 ---
 
@@ -652,7 +658,9 @@ fungalphylo db query /path/to/project "SELECT * FROM families"
 | `--submit` | busco-slurm, interproscan-slurm, orthofinder-slurm, phylo-slurm, protsetphylo | Submit SLURM job after writing |
 | `--resume-run-id` | busco-slurm, interproscan-slurm, orthofinder-slurm | Resume a timed-out run |
 | `--max-concurrent` | phylo-slurm | Max concurrent array tasks (default: 380) |
-| `--og-only` | orthofinder-slurm | Use dendroblast (skip MSA/gene trees) |
+| `--og-only` | orthofinder-slurm | Stop after orthogroup sequences (`-M msa -os`) |
+| `--orientation` | protsetphylo og-report | Table orientation: horizontal or vertical |
+| `--force` | init, protsetphylo init | Overwrite existing project/family |
 | `--min-single-copy` | filter-orthogroups | Fraction of species with exactly 1 copy (default: 0.75) |
 | `--staging-id` | most compute commands | Target a specific snapshot |
 | `--no-confirm` | SLURM commands | Skip account confirmation prompt |

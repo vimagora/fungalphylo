@@ -257,11 +257,11 @@ Completion proof:
 - `families` row in SQLite
 
 Skip behavior:
-- rejects if family directory already exists (no implicit overwrite)
+- rejects if family directory already exists, unless `--force` is used
 
 Rerun contract:
-- to re-initialize, delete the family directory and its SQLite row first
-- each family ID is unique; the command will not overwrite an existing family
+- `--force` deletes the existing family directory and DB row, then re-initializes from scratch
+- without `--force`, each family ID is unique; the command will not overwrite an existing family
 
 ## `protsetphylo interproscan`
 
@@ -367,9 +367,89 @@ Rerun contract:
 - resume mode refreshes the SLURM script without creating a new manifest or DB row
 
 Operator guidance:
-- use `--og-only` (dendroblast mode) for orthogroup-only analysis; avoids expensive MSA on large orthogroups
-- OrthoFinder v3 uses `--localpair --maxiterate 1000` for gene tree MSAs, which can fail on large orthogroups
-- the generated script handles Puhti module setup automatically when `env_activate` is configured in tools.yaml
+- use `--og-only` for orthogroup-only analysis (`-M msa -os`); stops after writing orthogroup sequences
+- without `--og-only`, the default is `-M msa` (full pipeline including gene trees and species tree)
+- OrthoFinder 2.5.5 is recommended (installed via Tykky container on Puhti)
+- configure `env_path` in tools.yaml to point to the Tykky bin directory; the script prepends it to PATH
+- `module load mafft` is always included in the generated script
+
+## `filter-orthogroups`
+
+Same work:
+- an OrthoFinder run's `Orthogroups.GeneCount.tsv` plus the `--min-single-copy` threshold
+
+Completion proof:
+- filtered `.fa` files in `runs/<run_id>/filtered_orthogroups/`
+- `filter_summary.tsv`
+
+Skip behavior:
+- none; rerunning overwrites the output directory
+
+Rerun contract:
+- always safe to rerun with different thresholds
+- overwrites `filtered_orthogroups/` contents in place
+
+## `phylo-slurm`
+
+Same work:
+- input `.fa` files (from filtered orthogroups or explicit dir), plus MAFFT/trimAl/IQ-TREE parameters
+
+Completion proof:
+- generated SLURM script under `runs/<run_id>/slurm/`
+- `og_filelist.txt` listing OG FASTAs
+- `runs/<run_id>/manifest.json`
+- `runs` row in SQLite
+
+Skip behavior:
+- none; rerunning creates a new run
+
+Rerun contract:
+- always safe to rerun; creates a new run scaffold each time
+
+## `protsetphylo og-report`
+
+Same work:
+- a family ID, OrthoFinder results, and characterized TSV
+
+Completion proof:
+- reports in `families/<family_id>/og_report/`
+- `og_decisions.txt` template
+
+Skip behavior:
+- none; rerunning overwrites reports
+
+Rerun contract:
+- always safe to rerun; regenerates all reports from current OrthoFinder results
+
+## `protsetphylo og-apply`
+
+Same work:
+- a family ID, OrthoFinder results, and edited `og_decisions.txt`
+
+Completion proof:
+- OG FASTAs in `families/<family_id>/og_selected/`
+
+Skip behavior:
+- none; rerunning overwrites output
+
+Rerun contract:
+- always safe to rerun after editing `og_decisions.txt`
+
+## `protsetphylo place-standalone`
+
+Same work:
+- a family ID, its `og_selected/` FASTAs, and standalone characterized FASTAs
+
+Completion proof:
+- generated SLURM script under `runs/<run_id>/slurm/`
+- `runs/<run_id>/manifest.json`
+- `runs` row in SQLite
+
+Skip behavior:
+- none; rerunning creates a new run
+
+Rerun contract:
+- always safe to rerun; creates a new run scaffold each time
 
 ## Status Interpretation
 
