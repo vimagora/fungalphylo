@@ -8,6 +8,7 @@ from fungalphylo.cli.commands.protsetphylo.init_family import init_command
 from fungalphylo.cli.commands.protsetphylo.interproscan import interproscan_command
 from fungalphylo.cli.commands.protsetphylo.og_apply import og_apply_command
 from fungalphylo.cli.commands.protsetphylo.og_report import og_report_command
+from fungalphylo.cli.commands.protsetphylo.phylo_slurm import phylo_slurm_command
 from fungalphylo.cli.commands.protsetphylo.place_standalone import place_standalone_command
 from fungalphylo.cli.commands.protsetphylo.select import select_command
 from fungalphylo.cli.commands.protsetphylo.tree import tree_command
@@ -25,3 +26,4 @@ app.command(name="og-apply")(og_apply_command)
 app.command(name="place-standalone")(place_standalone_command)
 app.command(name="align")(align_command)
 app.command(name="tree")(tree_command)
+app.command(name="phylo-slurm")(phylo_slurm_command)

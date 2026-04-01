@@ -10,15 +10,23 @@ This is the working status board for developers. It is intentionally short and o
 - OrthoFinder 2.5.5 via Tykky container validated on Puhti with 149 proteomes (mfs_sugar family).
 - `orthofinder-slurm` uses `env_path` (PATH export) instead of `env_activate` (source). Default: `-M msa`. `--og-only` adds `-os`.
 - `filter-orthogroups` selects single-copy OGs (≥75% threshold).
-- `phylo-slurm` generates parallel MAFFT → trimAl → IQ-TREE array jobs.
+- `phylo-slurm` uses cap-and-resubmit orchestrator + worker with step-level resume. Handles any number of OGs within Puhti array limits.
+- `protsetphylo phylo-slurm` uses chained SLURM array jobs (align→trim→tree) with `--dependency=afterok:`, per-step resource allocation, MAFFT `--auto`, and `--iqtree-fast` option.
 - `og-report` supports `--orientation horizontal|vertical` and uses `portal_id|protein_name` for characterized gene labels.
 - `og-apply` parses include/merge decisions and writes OG FASTAs.
 - `place-standalone` generates HMM-based placement SLURM script for standalone characterized genes.
 - `protsetphylo init` supports `--force` to overwrite existing family.
 - `select` writes standalone characterized genes to `selected/standalone/` and guards against BLAST replacement collisions.
-- All 134 tests pass. Code compiles with `python -m compileall src`.
+- All 143 tests pass. Code compiles with `python -m compileall src`.
 
-## Recently Completed (2026-03-30 session)
+## Recently Completed (2026-04-01 session)
+
+- Refactored `phylo-slurm` to cap-and-resubmit pattern: orchestrator script computes pending OGs (checks for `.treefile`), caps array to `--max-array-size` (380), submits worker. Worker has step-level resume (skips steps whose output exists). Solves Puhti's 400-job array limit for large OG sets (e.g., 2690 OGs).
+- Created `protsetphylo phylo-slurm`: chained SLURM array jobs with `--dependency=afterok:` for align→trim→tree. Per-step resource allocation (align: 8cpu/4G/4h, trim: 1cpu/4G/15min, tree: 8cpu/4G/8h). MAFFT `--auto`, IQ-TREE `-m TEST`, optional `--iqtree-fast`. Same cap-and-resubmit orchestrator.
+- Updated presentation slides with all current pipeline state + next steps.
+- 143 tests pass (6 new for phylo-slurm, 5 new for protsetphylo phylo-slurm).
+
+## Previously Completed (2026-03-30 session)
 
 - Switched OrthoFinder from v3 to v2.5.5 via Tykky container (STRIDE bug in v3 crashes species tree inference).
 - `orthofinder-slurm`: `env_activate` → `env_path` (PATH export), `-M dendroblast` → `-M msa -os` for `--og-only`, `-M msa` for full.
@@ -55,16 +63,17 @@ This is the working status board for developers. It is intentionally short and o
 - BUSCO and InterProScan SLURM pipelines (validated on Puhti, resume works)
 - OrthoFinder 2.5.5 via Tykky (validated on Puhti with 149 proteomes)
 - `filter-orthogroups` for single-copy OG selection
-- `phylo-slurm` for parallel gene tree inference
-- Full `protsetphylo` pipeline: init → interproscan → select → orthofinder-slurm → og-report → og-apply → place-standalone → phylo-slurm
+- `phylo-slurm` for parallel gene tree inference (cap-and-resubmit, step-level resume)
+- `protsetphylo phylo-slurm` for chained per-step array jobs on gene families
+- Full `protsetphylo` pipeline: init → interproscan → select → orthofinder-slurm → place-standalone → og-report → og-apply → phylo-slurm
 - Quick path: build-fasta → align → tree (MMseqs2/CD-HIT clustering)
 
 ## Immediate Next Work
 
 ### Production runs on Puhti
 
-- mfs_sugar family: OrthoFinder 2.5.5 run completed, og-report generated, proceeding with og-apply and phylo-slurm.
-- place-standalone for outgroup species without portal_id.
+- mfs_sugar family: OrthoFinder 2.5.5 run completed, og-report generated, place-standalone validated. Ready for og-apply and protsetphylo phylo-slurm.
+- Species tree: filter-orthogroups done (2690 OGs), ready for phylo-slurm with new cap-and-resubmit pattern.
 
 ### Commit
 

@@ -15,13 +15,23 @@ from fungalphylo.core.slurm import infer_account_from_project_dir
 from fungalphylo.core.tools import bin_dir_export_lines, load_tools
 from fungalphylo.db.db import connect, init_db
 
-app = typer.Typer(
-    help="Generate a SLURM array job: MAFFT -> trimAl -> IQ-TREE per orthogroup."
-)
-
 
 def _ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
+
+
+def _find_og_input_dir(paths: ProjectPaths, family_id: str) -> Path:
+    """Find the best OG FASTA directory for a family: og_placed > og_selected."""
+    og_placed = paths.family_og_placed_dir(family_id)
+    if og_placed.is_dir() and any(og_placed.glob("*.fa")):
+        return og_placed
+    og_selected = paths.family_og_selected_dir(family_id)
+    if og_selected.is_dir() and any(og_selected.glob("*.fa")):
+        return og_selected
+    raise typer.BadParameter(
+        f"No OG FASTA files found for family {family_id!r}. "
+        "Run `protsetphylo og-apply` first, or provide --input-dir."
+    )
 
 
 def _render_orchestrator(
@@ -31,6 +41,17 @@ def _render_orchestrator(
     worker_script: Path,
     max_array_size: int,
     max_concurrent: int,
+    acct: str,
+    # Per-step SLURM overrides
+    align_time: str,
+    align_cpus: int,
+    align_mem_per_cpu: str,
+    trim_time: str,
+    trim_cpus: int,
+    trim_mem_per_cpu: str,
+    tree_time: str,
+    tree_cpus: int,
+    tree_mem_per_cpu: str,
 ) -> str:
     return f"""#!/usr/bin/env bash
 set -euo pipefail
@@ -81,46 +102,82 @@ fi
 PENDING_LIST="${{FILELIST}}.pending"
 cp "$PENDING" "$PENDING_LIST"
 
-echo "Submitting array of $NPENDING tasks..."
-jobid=$(sbatch --parsable --array="1-${{NPENDING}}%${{MAX_CONCURRENT}}" "$WORKER" "$PENDING_LIST")
-echo "Submitted job $jobid (array 1-${{NPENDING}}%${{MAX_CONCURRENT}})"
+echo "Submitting chained array jobs: align -> trim -> tree"
+echo "Array size: $NPENDING, max concurrent: $MAX_CONCURRENT"
+echo ""
+
+# Step 1: Alignment
+ALIGN_JOB=$(sbatch --parsable \\
+    --array="1-${{NPENDING}}%${{MAX_CONCURRENT}}" \\
+    --account={acct} \\
+    --time={align_time} --cpus-per-task={align_cpus} --mem-per-cpu={align_mem_per_cpu} \\
+    "$WORKER" --step align "$PENDING_LIST")
+echo "Submitted align  array: $ALIGN_JOB"
+
+# Step 2: Trimming (depends on alignment)
+TRIM_JOB=$(sbatch --parsable \\
+    --dependency=afterok:${{ALIGN_JOB}} \\
+    --array="1-${{NPENDING}}%${{MAX_CONCURRENT}}" \\
+    --account={acct} \\
+    --time={trim_time} --cpus-per-task={trim_cpus} --mem-per-cpu={trim_mem_per_cpu} \\
+    "$WORKER" --step trim "$PENDING_LIST")
+echo "Submitted trim   array: $TRIM_JOB (depends on $ALIGN_JOB)"
+
+# Step 3: Tree building (depends on trimming)
+TREE_JOB=$(sbatch --parsable \\
+    --dependency=afterok:${{TRIM_JOB}} \\
+    --array="1-${{NPENDING}}%${{MAX_CONCURRENT}}" \\
+    --account={acct} \\
+    --time={tree_time} --cpus-per-task={tree_cpus} --mem-per-cpu={tree_mem_per_cpu} \\
+    "$WORKER" --step tree "$PENDING_LIST")
+echo "Submitted tree   array: $TREE_JOB (depends on $TRIM_JOB)"
+
+echo ""
+echo "Chain: align($ALIGN_JOB) -> trim($TRIM_JOB) -> tree($TREE_JOB)"
 echo "Rerun this script after completion to process any remaining OGs."
 """
 
 
 def _render_worker(
     *,
-    acct: str,
     rid: str,
     logs_dir: Path,
-    time: str,
-    cpus: int,
-    mem_per_cpu: str,
     partition: str,
     output_root: Path,
     bin_export: str,
     mafft_cmd: str,
     trimal_cmd: str,
     iqtree_cmd: str,
-    mafft_retree: int,
-    mafft_maxiterate: int,
     trimal_gt: float,
     trimal_cons: float,
     iqtree_model: str,
     iqtree_bootstrap: int,
     iqtree_alrt: int,
+    iqtree_fast: bool,
 ) -> str:
+    fast_flag = " -fast" if iqtree_fast else ""
     return f"""#!/bin/bash
-#SBATCH --account={acct}
 #SBATCH --job-name=phylo_{rid}
 #SBATCH --output={logs_dir.as_posix()}/%x_%A_%a.out
 #SBATCH --error={logs_dir.as_posix()}/%x_%A_%a.err
-#SBATCH --time={time}
-#SBATCH --cpus-per-task={cpus}
-#SBATCH --mem-per-cpu={mem_per_cpu}
 #SBATCH --partition={partition}
 
 set -euo pipefail
+
+# Parse arguments: --step {{align,trim,tree}} <filelist>
+STEP=""
+FILELIST=""
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --step) STEP="$2"; shift 2;;
+        *) FILELIST="$1"; shift;;
+    esac
+done
+
+if [[ -z "$STEP" || -z "$FILELIST" ]]; then
+    echo "Usage: $0 --step {{align,trim,tree}} <filelist>" >&2
+    exit 1
+fi
 
 module load mafft
 
@@ -128,7 +185,6 @@ module load mafft
 THREADS="${{SLURM_CPUS_PER_TASK:-1}}"
 
 # Read the OG file for this array task
-FILELIST="$1"
 OG_FASTA=$(sed -n "${{SLURM_ARRAY_TASK_ID}}p" "$FILELIST")
 OG_NAME=$(basename "$OG_FASTA" .fa)
 
@@ -138,91 +194,98 @@ mkdir -p "$OUTDIR"
 ALIGNED="$OUTDIR/$OG_NAME.aligned.faa"
 TRIMMED="$OUTDIR/$OG_NAME.trimmed.faa"
 
-echo "=== Array task $SLURM_ARRAY_TASK_ID: $OG_NAME ==="
-echo "Input:   $OG_FASTA"
-echo "Output:  $OUTDIR"
-echo "Threads: $THREADS"
+echo "=== Task $SLURM_ARRAY_TASK_ID | Step: $STEP | OG: $OG_NAME ==="
 
-# Step 1: MAFFT alignment (skip if output exists)
-if [ ! -s "$ALIGNED" ]; then
-    echo "--- MAFFT ---"
-    "{mafft_cmd}" --retree {mafft_retree} --maxiterate {mafft_maxiterate} \\
-      --thread "$THREADS" "$OG_FASTA" > "$ALIGNED"
-    if [ ! -s "$ALIGNED" ]; then
-        echo "ERROR: MAFFT produced empty alignment for $OG_NAME" >&2
+case "$STEP" in
+    align)
+        if [ ! -s "$ALIGNED" ]; then
+            echo "--- MAFFT (--auto) ---"
+            "{mafft_cmd}" --auto --thread "$THREADS" "$OG_FASTA" > "$ALIGNED"
+            if [ ! -s "$ALIGNED" ]; then
+                echo "ERROR: MAFFT produced empty alignment for $OG_NAME" >&2
+                exit 1
+            fi
+        else
+            echo "Alignment exists, skipping."
+        fi
+        ;;
+    trim)
+        if [ ! -s "$TRIMMED" ]; then
+            if [ ! -s "$ALIGNED" ]; then
+                echo "ERROR: Alignment missing for $OG_NAME, cannot trim" >&2
+                exit 1
+            fi
+            echo "--- trimAl ---"
+            "{trimal_cmd}" -in "$ALIGNED" -out "$TRIMMED" \\
+              -gt {trimal_gt} -cons {trimal_cons}
+            if [ ! -s "$TRIMMED" ]; then
+                echo "ERROR: trimAl produced empty output for $OG_NAME" >&2
+                exit 1
+            fi
+        else
+            echo "Trimmed alignment exists, skipping."
+        fi
+        ;;
+    tree)
+        if [ ! -s "$OUTDIR/$OG_NAME.treefile" ]; then
+            if [ ! -s "$TRIMMED" ]; then
+                echo "ERROR: Trimmed alignment missing for $OG_NAME, cannot build tree" >&2
+                exit 1
+            fi
+            echo "--- IQ-TREE ---"
+            "{iqtree_cmd}" -s "$TRIMMED" \\
+              -m {iqtree_model} -B {iqtree_bootstrap} -alrt {iqtree_alrt} \\
+              -T "$THREADS"{fast_flag} --prefix "$OUTDIR/$OG_NAME"
+        else
+            echo "Tree exists, skipping."
+        fi
+        ;;
+    *)
+        echo "ERROR: Unknown step '$STEP'. Use align, trim, or tree." >&2
         exit 1
-    fi
-else
-    echo "Alignment exists, skipping MAFFT."
-fi
+        ;;
+esac
 
-# Step 2: trimAl (skip if output exists)
-if [ ! -s "$TRIMMED" ]; then
-    echo "--- trimAl ---"
-    "{trimal_cmd}" -in "$ALIGNED" -out "$TRIMMED" \\
-      -gt {trimal_gt} -cons {trimal_cons}
-    if [ ! -s "$TRIMMED" ]; then
-        echo "ERROR: trimAl produced empty output for $OG_NAME" >&2
-        exit 1
-    fi
-else
-    echo "Trimmed alignment exists, skipping trimAl."
-fi
-
-# Step 3: IQ-TREE (skip if treefile exists)
-if [ ! -s "$OUTDIR/$OG_NAME.treefile" ]; then
-    echo "--- IQ-TREE ---"
-    "{iqtree_cmd}" -s "$TRIMMED" \\
-      -m {iqtree_model} -B {iqtree_bootstrap} -alrt {iqtree_alrt} \\
-      -T "$THREADS" --prefix "$OUTDIR/$OG_NAME"
-else
-    echo "Tree exists, skipping IQ-TREE."
-fi
-
-echo "=== Done: $OG_NAME ==="
+echo "=== Done: $OG_NAME ($STEP) ==="
 """
 
 
-@app.callback(invoke_without_command=True)
 def phylo_slurm_command(
-    ctx: typer.Context,
-    project_dir: Path = typer.Argument(
-        ..., help="Project directory."
-    ),
-    run_id: str | None = typer.Option(
-        None, "--run-id",
-        help="OrthoFinder run ID to read filtered orthogroups from.",
-    ),
+    project_dir: Path = typer.Argument(..., help="Project directory"),
+    family_id: str = typer.Option(..., "--family-id", help="Family to run phylo pipeline on"),
     input_dir: Path | None = typer.Option(
         None, "--input-dir",
-        help="Explicit directory of .fa orthogroup files (overrides --run-id).",
+        help="Explicit directory of .fa OG files (overrides auto-detection).",
     ),
     output_run_id: str | None = typer.Option(
-        None, "--output-run-id",
-        help="Run ID for this phylo run (default: phylo_<timestamp>).",
+        None, "--output-run-id", help="Run ID (default: phylo_<family>_<timestamp>)"
     ),
-    time: str | None = typer.Option(None, "--time", help="SLURM time per task (default: 12:00:00)"),
-    cpus: int | None = typer.Option(None, "--cpus", help="CPUs per task (default: 16)"),
-    mem_per_cpu: str | None = typer.Option(
-        None, "--mem-per-cpu", help="Memory per CPU (default: 2G)"
-    ),
-    partition: str | None = typer.Option(None, "--partition", help="SLURM partition"),
+    account: str | None = typer.Option(None, "--account", help="SLURM account"),
+    no_confirm: bool = typer.Option(False, "--no-confirm", help="Skip account confirmation"),
+    partition: str = typer.Option("small", "--partition", help="SLURM partition"),
     max_concurrent: int | None = typer.Option(
         None, "--max-concurrent", help="Max concurrent array tasks (default: 100)"
     ),
     max_array_size: int | None = typer.Option(
         None, "--max-array-size", help="Max array tasks per submission (default: 380)"
     ),
-    account: str | None = typer.Option(
-        None, "--account", help="SLURM account (overrides auto-detect)"
+    # Per-step SLURM resource overrides
+    align_time: str = typer.Option("04:00:00", "--align-time", help="Time for alignment step"),
+    align_cpus: int = typer.Option(8, "--align-cpus", help="CPUs for alignment step"),
+    align_mem_per_cpu: str = typer.Option(
+        "4G", "--align-mem-per-cpu", help="Memory per CPU for alignment step"
     ),
-    no_confirm: bool = typer.Option(
-        False, "--no-confirm", help="Do not prompt to confirm detected account"
+    trim_time: str = typer.Option("00:15:00", "--trim-time", help="Time for trimming step"),
+    trim_cpus: int = typer.Option(1, "--trim-cpus", help="CPUs for trimming step"),
+    trim_mem_per_cpu: str = typer.Option(
+        "4G", "--trim-mem-per-cpu", help="Memory per CPU for trimming step"
     ),
-    mafft_retree: int = typer.Option(2, "--mafft-retree", help="MAFFT --retree value"),
-    mafft_maxiterate: int = typer.Option(
-        1000, "--mafft-maxiterate", help="MAFFT --maxiterate value"
+    tree_time: str = typer.Option("08:00:00", "--tree-time", help="Time for tree building step"),
+    tree_cpus: int = typer.Option(8, "--tree-cpus", help="CPUs for tree building step"),
+    tree_mem_per_cpu: str = typer.Option(
+        "4G", "--tree-mem-per-cpu", help="Memory per CPU for tree building step"
     ),
+    # Tool parameters
     trimal_gt: float = typer.Option(0.8, "--trimal-gt", help="trimAl gap threshold"),
     trimal_cons: float = typer.Option(10.0, "--trimal-cons", help="trimAl conservation threshold"),
     iqtree_model: str = typer.Option("TEST", "--iqtree-model", help="IQ-TREE model selection"),
@@ -230,46 +293,37 @@ def phylo_slurm_command(
         1000, "--iqtree-bootstrap", help="IQ-TREE ultrafast bootstrap replicates"
     ),
     iqtree_alrt: int = typer.Option(1000, "--iqtree-alrt", help="IQ-TREE SH-aLRT replicates"),
-    submit: bool = typer.Option(False, "--submit", help="Submit with sbatch after writing script"),
+    iqtree_fast: bool = typer.Option(
+        False, "--iqtree-fast", help="Use IQ-TREE -fast mode for quicker tree inference"
+    ),
+    submit: bool = typer.Option(
+        False, "--submit", help="Run orchestrator after writing scripts"
+    ),
 ) -> None:
-    if ctx.invoked_subcommand is not None:
-        return
-
+    """Generate chained SLURM array jobs for family OGs: MAFFT --auto -> trimAl -> IQ-TREE."""
     project_dir = project_dir.expanduser().resolve()
     paths = ProjectPaths(project_dir)
     ensure_project_dirs(paths)
     init_db(paths.db_path)
-
     tools = load_tools(project_dir)
 
-    # Resolve input directory of OG .fa files
+    # Verify family exists
+    conn = connect(paths.db_path)
+    try:
+        family_row = conn.execute(
+            "SELECT * FROM families WHERE family_id = ?", (family_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if family_row is None:
+        raise typer.BadParameter(f"Family not found: {family_id!r}")
+
+    # Resolve input directory
     if input_dir is not None:
         og_dir = input_dir.expanduser().resolve()
-        source_run_id = None
-    elif run_id is not None:
-        og_dir = paths.run_dir(run_id) / "filtered_orthogroups"
-        source_run_id = run_id
     else:
-        # Find latest orthofinder run with filtered_orthogroups
-        candidates = []
-        for manifest_path in paths.runs_root.glob("*/manifest.json"):
-            try:
-                data = json.loads(manifest_path.read_text(encoding="utf-8"))
-                if data.get("kind") == "orthofinder":
-                    filtered = manifest_path.parent / "filtered_orthogroups"
-                    if filtered.is_dir() and any(filtered.glob("*.fa")):
-                        candidates.append((data.get("created_at", ""), data["run_id"]))
-            except (json.JSONDecodeError, KeyError):
-                continue
-        if not candidates:
-            raise typer.BadParameter(
-                "No OrthoFinder runs with filtered orthogroups found. "
-                "Run `filter-orthogroups` first, or provide --run-id / --input-dir."
-            )
-        candidates.sort(reverse=True)
-        source_run_id = candidates[0][1]
-        og_dir = paths.run_dir(source_run_id) / "filtered_orthogroups"
-        typer.echo(f"Using filtered OGs from run: {source_run_id}")
+        og_dir = _find_og_input_dir(paths, family_id)
+    typer.echo(f"Using OG FASTAs from: {og_dir}")
 
     if not og_dir.is_dir():
         raise typer.BadParameter(f"Input directory does not exist: {og_dir}")
@@ -281,11 +335,10 @@ def phylo_slurm_command(
     n_ogs = len(og_files)
 
     # Account
-    inferred = infer_account_from_project_dir(project_dir)
-    acct = account or inferred
+    acct = account or infer_account_from_project_dir(project_dir)
     if not acct:
         raise typer.BadParameter(
-            "Could not infer SLURM account from project_dir. Provide --account explicitly."
+            "Could not infer SLURM account. Provide --account explicitly."
         )
     if not no_confirm and account is None:
         ok = typer.confirm(
@@ -293,16 +346,10 @@ def phylo_slurm_command(
             default=True,
         )
         if not ok:
-            raise typer.BadParameter(
-                "Account not confirmed. Re-run with --account <account> or --no-confirm."
-            )
+            raise typer.BadParameter("Account not confirmed.")
 
     # Defaults
-    rid = output_run_id or f"phylo_{now_tag()}"
-    time = time or "12:00:00"
-    cpus = cpus if cpus is not None else 16
-    mem_per_cpu = mem_per_cpu or "2G"
-    partition = partition or "small"
+    rid = output_run_id or f"phylo_{family_id}_{now_tag()}"
     max_concurrent = max_concurrent if max_concurrent is not None else 100
     max_array_size = max_array_size if max_array_size is not None else 380
 
@@ -315,7 +362,7 @@ def phylo_slurm_command(
     _ensure_dir(output_root)
     _ensure_dir(logs_dir)
 
-    # Write file list (one OG FASTA path per line)
+    # Write file list
     filelist_path = slurm_dir / "og_filelist.txt"
     filelist_path.write_text(
         "\n".join(str(f) for f in og_files) + "\n", encoding="utf-8"
@@ -331,25 +378,20 @@ def phylo_slurm_command(
     orchestrator_path = slurm_dir / "phylo_orchestrate.sh"
 
     worker_script = _render_worker(
-        acct=acct,
         rid=rid,
         logs_dir=logs_dir,
-        time=time,
-        cpus=cpus,
-        mem_per_cpu=mem_per_cpu,
         partition=partition,
         output_root=output_root,
         bin_export=bin_export,
         mafft_cmd=tools.mafft.command,
         trimal_cmd=tools.trimal.command,
         iqtree_cmd=tools.iqtree.command,
-        mafft_retree=mafft_retree,
-        mafft_maxiterate=mafft_maxiterate,
         trimal_gt=trimal_gt,
         trimal_cons=trimal_cons,
         iqtree_model=iqtree_model,
         iqtree_bootstrap=iqtree_bootstrap,
         iqtree_alrt=iqtree_alrt,
+        iqtree_fast=iqtree_fast,
     )
 
     orchestrator_script = _render_orchestrator(
@@ -358,6 +400,16 @@ def phylo_slurm_command(
         worker_script=worker_path,
         max_array_size=max_array_size,
         max_concurrent=max_concurrent,
+        acct=acct,
+        align_time=align_time,
+        align_cpus=align_cpus,
+        align_mem_per_cpu=align_mem_per_cpu,
+        trim_time=trim_time,
+        trim_cpus=trim_cpus,
+        trim_mem_per_cpu=trim_mem_per_cpu,
+        tree_time=tree_time,
+        tree_cpus=tree_cpus,
+        tree_mem_per_cpu=tree_mem_per_cpu,
     )
 
     worker_path.write_text(worker_script, encoding="utf-8")
@@ -366,11 +418,12 @@ def phylo_slurm_command(
     orchestrator_path.chmod(0o755)
 
     # Manifest
+    created_at = now_iso()
     manifest_data = {
         "run_id": rid,
-        "kind": "phylo",
-        "created_at": now_iso(),
-        "source_run_id": source_run_id,
+        "kind": "family_phylo",
+        "created_at": created_at,
+        "family_id": family_id,
         "project_dir": str(project_dir),
         "paths": {
             "run_dir": str(run_root.relative_to(project_dir)),
@@ -382,23 +435,35 @@ def phylo_slurm_command(
             "logs_dir": str(logs_dir.relative_to(project_dir)),
         },
         "parameters": {
-            "mafft_retree": mafft_retree,
-            "mafft_maxiterate": mafft_maxiterate,
             "trimal_gt": trimal_gt,
             "trimal_cons": trimal_cons,
             "iqtree_model": iqtree_model,
             "iqtree_bootstrap": iqtree_bootstrap,
             "iqtree_alrt": iqtree_alrt,
+            "iqtree_fast": iqtree_fast,
+            "mafft_mode": "auto",
         },
         "slurm": {
             "account": acct,
             "partition": partition,
-            "time": time,
-            "cpus": cpus,
-            "mem_per_cpu": mem_per_cpu,
             "max_concurrent": max_concurrent,
             "max_array_size": max_array_size,
             "total_ogs": n_ogs,
+            "align": {
+                "time": align_time,
+                "cpus": align_cpus,
+                "mem_per_cpu": align_mem_per_cpu,
+            },
+            "trim": {
+                "time": trim_time,
+                "cpus": trim_cpus,
+                "mem_per_cpu": trim_mem_per_cpu,
+            },
+            "tree": {
+                "time": tree_time,
+                "cpus": tree_cpus,
+                "mem_per_cpu": tree_mem_per_cpu,
+            },
             "submit": submit,
         },
     }
@@ -406,13 +471,12 @@ def phylo_slurm_command(
     write_manifest(manifest_path, manifest_data)
     manifest_sha256 = hash_json(manifest_data)
 
-    # DB row
     conn = connect(paths.db_path)
     try:
         conn.execute(
             "INSERT OR IGNORE INTO stagings(staging_id, created_at, manifest_path, manifest_sha256) "
-            "VALUES(?,?,?,?)",
-            ("__family__", now_iso(), "__family__", "__family__"),
+            "VALUES('__family__', ?, '__family__', '__family__')",
+            (created_at,),
         )
         conn.execute(
             "INSERT OR REPLACE INTO runs(run_id, staging_id, kind, created_at, manifest_path, manifest_sha256) "
@@ -420,8 +484,8 @@ def phylo_slurm_command(
             (
                 rid,
                 "__family__",
-                "phylo",
-                manifest_data["created_at"],
+                "family_phylo",
+                created_at,
                 str(manifest_path.relative_to(project_dir)),
                 manifest_sha256,
             ),
@@ -433,11 +497,10 @@ def phylo_slurm_command(
     log_event(
         project_dir,
         {
-            "ts": now_iso(),
-            "event": "slurm_phylo_write",
+            "ts": created_at,
+            "event": "protsetphylo_phylo_write",
+            "family_id": family_id,
             "run_id": rid,
-            "source_run_id": source_run_id,
-            "input_dir": str(og_dir),
             "n_ogs": n_ogs,
             "orchestrator": str(orchestrator_path),
             "worker": str(worker_path),
@@ -446,12 +509,15 @@ def phylo_slurm_command(
         },
     )
 
-    typer.echo(f"Wrote phylo SLURM scripts:")
+    typer.echo(f"Wrote family phylo SLURM scripts:")
+    typer.echo(f"  Family:       {family_id}")
     typer.echo(f"  Orchestrator: {orchestrator_path}")
     typer.echo(f"  Worker:       {worker_path}")
     typer.echo(f"  Orthogroups:  {n_ogs} total (max {max_array_size} per submission)")
     typer.echo(f"  Output:       {output_root}")
-    typer.echo(f"  File list:    {filelist_path}")
+    typer.echo(f"  Steps:        align ({align_time}, {align_cpus}cpu, {align_mem_per_cpu}/cpu)")
+    typer.echo(f"                trim  ({trim_time}, {trim_cpus}cpu, {trim_mem_per_cpu}/cpu)")
+    typer.echo(f"                tree  ({tree_time}, {tree_cpus}cpu, {tree_mem_per_cpu}/cpu)")
     typer.echo("")
     typer.echo("To run: bash " + str(orchestrator_path))
     typer.echo("Rerun the orchestrator after completion to process remaining OGs.")
@@ -466,16 +532,15 @@ def phylo_slurm_command(
                 project_dir,
                 {
                     "ts": now_iso(),
-                    "event": "slurm_phylo_submit",
+                    "event": "protsetphylo_phylo_submit",
+                    "family_id": family_id,
                     "run_id": rid,
                     "orchestrator": str(orchestrator_path),
                     "sbatch_stdout": res.stdout.strip(),
                 },
             )
         except FileNotFoundError:
-            raise RuntimeError(
-                "bash not found on PATH."
-            ) from None
+            raise RuntimeError("bash not found on PATH.") from None
         except subprocess.CalledProcessError as e:
             raise RuntimeError(
                 f"Orchestrator failed: {e.stderr.strip() if e.stderr else str(e)}"

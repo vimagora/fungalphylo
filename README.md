@@ -297,31 +297,41 @@ Outputs in `runs/<run_id>/filtered_orthogroups/`:
 
 ## Compute: Gene Trees (`phylo-slurm`)
 
-SLURM array job running MAFFT → trimAl → IQ-TREE per orthogroup in parallel:
+Cap-and-resubmit SLURM array job running MAFFT → trimAl → IQ-TREE per orthogroup. Generates two scripts: an **orchestrator** (run on the login node) that computes pending OGs and caps the array, and a **worker** (sbatch array job) with step-level resume.
 
 ```bash
-# From filtered orthogroups (auto-detect)
+# Generate scripts (auto-detect filtered orthogroups)
+fungalphylo phylo-slurm /path/to/project
+
+# Then run on login node:
+bash runs/<run_id>/slurm/phylo_orchestrate.sh
+# Rerun after completion to process remaining OGs
+
+# Or generate + submit in one step
 fungalphylo phylo-slurm /path/to/project --submit
 
 # From a specific OrthoFinder run
-fungalphylo phylo-slurm /path/to/project --run-id <orthofinder_run_id> --submit
+fungalphylo phylo-slurm /path/to/project --run-id <orthofinder_run_id>
 
 # From an explicit directory of .fa files
-fungalphylo phylo-slurm /path/to/project --input-dir /path/to/fastas --submit
+fungalphylo phylo-slurm /path/to/project --input-dir /path/to/fastas
 
 # Custom parameters
 fungalphylo phylo-slurm /path/to/project \
   --mafft-maxiterate 500 --trimal-gt 0.5 \
-  --iqtree-model LG+G4 --iqtree-bootstrap 2000 --submit
+  --iqtree-model LG+G4 --iqtree-bootstrap 2000 \
+  --max-array-size 200 --max-concurrent 50
 ```
 
 Default parameters per array task:
 - **MAFFT**: `--retree 2 --maxiterate 1000`
 - **trimAl**: `-gt 0.8 -cons 10`
 - **IQ-TREE**: `-m TEST -B 1000 -alrt 1000`
-- **SLURM**: 16 CPUs, 2G/cpu, 12h, max 380 concurrent tasks (Puhti safe limit)
+- **SLURM**: 16 CPUs, 2G/cpu, 12h, max 380 tasks per submission, max 100 concurrent
 
-Only MAFFT is loaded via `module load mafft`. trimAl and IQ-TREE3 use binaries configured via `bin_dir` in `tools.yaml`.
+**How it works**: The orchestrator checks which OGs already have a `.treefile`, writes a pending list, caps the array to `--max-array-size` (default 380, within Puhti's limits), and submits. The worker skips steps whose output already exists (step-level resume). After the batch completes, rerun the orchestrator to process remaining OGs. For 2690 OGs, you'd rerun ~7 times.
+
+Only MAFFT is loaded via `module load mafft`. trimAl and IQ-TREE use binaries configured via `bin_dir` in `tools.yaml`.
 
 Output per OG in `runs/<run_id>/gene_trees/<OG_ID>/`:
 - `<OG_ID>.aligned.faa` — MAFFT alignment
@@ -337,13 +347,13 @@ Analyze specific gene families (e.g., MFS sugar transporters) across your staged
 ### Pipeline
 
 ```
-protsetphylo init → interproscan → select → orthofinder-slurm → [place-standalone] → og-report → og-apply → phylo-slurm
+protsetphylo init → interproscan → select → orthofinder-slurm → [place-standalone] → og-report → og-apply → protsetphylo phylo-slurm
                                       ↓
                               (optional quick path)
                           build-fasta → MMseqs2/CD-HIT → align → tree
 ```
 
-The recommended path uses OrthoFinder on the per-species FASTAs from `select`. If standalone characterized genes exist (no `portal_id`), `place-standalone` uses HMM profiles to assign them to OGs before reporting. Then `og-report` inspects orthogroups containing characterized genes, `og-apply` selects/merges OGs, and `phylo-slurm` runs parallel MAFFT → trimAl → IQ-TREE. The optional quick path uses `build-fasta` with clustering for fast exploratory analysis.
+The recommended path uses OrthoFinder on the per-species FASTAs from `select`. If standalone characterized genes exist (no `portal_id`), `place-standalone` uses HMM profiles to assign them to OGs before reporting. Then `og-report` inspects orthogroups containing characterized genes, `og-apply` selects/merges OGs, and `protsetphylo phylo-slurm` runs chained SLURM array jobs (MAFFT --auto → trimAl → IQ-TREE) with per-step resource allocation. The optional quick path uses `build-fasta` with clustering for fast exploratory analysis.
 
 ### Step-by-step
 
@@ -475,14 +485,51 @@ By default, `og-apply` reads from `og_placed/` (which includes standalone genes)
 
 Outputs FASTAs to `families/mfs_sugar/og_selected/`, ready for the next step.
 
-#### 8. Gene tree inference with `phylo-slurm`
+#### 8. Gene tree inference with `protsetphylo phylo-slurm`
+
+Chained SLURM array jobs with per-step resource allocation, designed for large OGs (thousands of proteins):
 
 ```bash
-fungalphylo phylo-slurm /path/to/project \
-  --input-dir /path/to/project/families/mfs_sugar/og_selected/ --submit
+# Generate scripts (auto-detects og_placed/ > og_selected/)
+fungalphylo protsetphylo phylo-slurm /path/to/project \
+  --family-id mfs_sugar --account project_xxx
+
+# Then run on login node:
+bash runs/<run_id>/slurm/phylo_orchestrate.sh
+# Rerun after completion to process remaining OGs
+
+# Or generate + submit in one step
+fungalphylo protsetphylo phylo-slurm /path/to/project \
+  --family-id mfs_sugar --account project_xxx --submit
+
+# With IQ-TREE fast mode for quicker inference
+fungalphylo protsetphylo phylo-slurm /path/to/project \
+  --family-id mfs_sugar --account project_xxx --iqtree-fast
+
+# Custom per-step resources (e.g., for very large OGs)
+fungalphylo protsetphylo phylo-slurm /path/to/project \
+  --family-id mfs_sugar --account project_xxx \
+  --align-time 06:00:00 --align-cpus 16 \
+  --tree-time 24:00:00 --tree-mem-per-cpu 8G
 ```
 
-Runs a SLURM array job: MAFFT → trimAl → IQ-TREE per OG. Gene trees output in `runs/<run_id>/gene_trees/<OG_ID>/`.
+**How it works**: The orchestrator chains three array submissions with `--dependency=afterok:`, each with different SLURM resources:
+
+| Step | Tool | Default resources |
+|------|------|-------------------|
+| `align` | MAFFT `--auto` | 8 CPUs, 4G/cpu, 4h |
+| `trim` | trimAl | 1 CPU, 4G, 15min |
+| `tree` | IQ-TREE `-m TEST` | 8 CPUs, 4G/cpu, 8h |
+
+The worker script uses a `--step` flag to run only one phase per submission. Each step checks if its output already exists (step-level resume). SLURM holds subsequent steps until all tasks in the previous step complete. Same cap-and-resubmit orchestrator pattern as species tree `phylo-slurm`.
+
+Key differences from species tree `phylo-slurm`:
+- **MAFFT `--auto`** (adapts algorithm to OG size) instead of `--retree 2 --maxiterate 1000`
+- **Chained submissions** with separate resource allocations per step
+- **`--iqtree-fast`** option for faster tree inference on large OGs
+- Input auto-detected from `og_placed/` (with standalone placements) or `og_selected/`
+
+Output per OG in `runs/<run_id>/gene_trees/<OG_ID>/`.
 
 #### Optional: Quick clustering with `build-fasta`
 
@@ -671,7 +718,10 @@ fungalphylo db query /path/to/project "SELECT * FROM families"
 | `--continue-on-error` | stage, restore, download | Don't stop on first failure |
 | `--submit` | busco-slurm, interproscan-slurm, orthofinder-slurm, phylo-slurm, protsetphylo | Submit SLURM job after writing |
 | `--resume-run-id` | busco-slurm, interproscan-slurm, orthofinder-slurm | Resume a timed-out run |
-| `--max-concurrent` | phylo-slurm | Max concurrent array tasks (default: 380) |
+| `--max-concurrent` | phylo-slurm, protsetphylo phylo-slurm | Max concurrent array tasks (default: 100) |
+| `--max-array-size` | phylo-slurm, protsetphylo phylo-slurm | Max tasks per submission (default: 380) |
+| `--iqtree-fast` | protsetphylo phylo-slurm | Use IQ-TREE `-fast` mode |
+| `--align-time`, `--tree-time`, etc. | protsetphylo phylo-slurm | Per-step SLURM resource overrides |
 | `--og-only` | orthofinder-slurm | Stop after orthogroup sequences (`-M msa -os`) |
 | `--orientation` | protsetphylo og-report | Table orientation: horizontal or vertical |
 | `--no-placed` | protsetphylo og-report, og-apply | Ignore og_placed/ and placements.tsv |

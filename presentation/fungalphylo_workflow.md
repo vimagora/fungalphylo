@@ -26,7 +26,7 @@ init -> ingest -> fetch-index -> autoselect -> review -> restore -> download -> 
 **Compute**
 
 ```
-busco-slurm -> interproscan-slurm -> orthofinder-slurm -> filter-orthogroups
+busco-slurm -> interproscan-slurm -> orthofinder-slurm -> filter-orthogroups -> phylo-slurm
 ```
 
 ---
@@ -55,6 +55,7 @@ project/
   raw/                     # Downloaded originals
   staging/                 # Immutable normalized snapshots
   runs/                    # Compute runs
+  families/                # Gene family analyses
   review/                  # Human-editable TSVs
   logs/                    # Event and error logs
 ```
@@ -232,21 +233,31 @@ fungalphylo interproscan-slurm --resume-run-id <run_id> --submit /path/to/projec
 # Orthogroups only (recommended)
 fungalphylo orthofinder-slurm --og-only --submit /path/to/project
 
-# Full analysis with MSA-based gene trees (will crash 90% of the time)
-fungalphylo orthofinder-slurm --submit /path/to/project
-
 # Resume a timed-out run (reuses DIAMOND results)
 fungalphylo orthofinder-slurm --resume-run-id <run_id> --submit /path/to/project
 ```
 
+- Uses OrthoFinder 2.5.5 via Tykky container on Puhti
+- `--og-only` adds `-M msa -os` (stops after orthogroup sequences)
+- Memory scales: 4G/cpu (<60 proteomes), 8G/cpu (>=60)
+
 ---
 
-# OrthoFinder: Key Options
+# OrthoFinder: Setup on Puhti
 
-- **`--og-only`**: Uses `-M dendroblast`, skips MSA/gene trees (orthogroups are identical)
-- Avoids OrthoFinder v3's aggressive MAFFT calls that crash on large OGs
-- Memory scales: 4G/cpu (<60 proteomes), 8G/cpu (>=60 proteomes)
-- Requires venv on Puhti -- configure `env_activate` in `tools.yaml`
+OrthoFinder 2.5.5 installed via Tykky container:
+
+```yaml
+# tools.yaml
+orthofinder:
+  env_path: "/scratch/project_xxx/software/of2_tykky/bin"
+  command: "orthofinder"
+  msa_program: "mafft"
+```
+
+- SLURM script prepends `env_path` to `PATH`
+- `module load mafft` loaded automatically for MSA
+- OrthoFinder 3 has STRIDE bugs with large datasets -- use v2.5.5
 
 ---
 
@@ -258,32 +269,46 @@ fungalphylo filter-orthogroups /path/to/project
 
 # Custom threshold
 fungalphylo filter-orthogroups --min-single-copy 0.80 /path/to/project 
-
-# Explicit run
-fungalphylo filter-orthogroups --run-id <run_id> /path/to/project 
 ```
 
-- Selects orthogroups for phylogenomics (MAFFT -> trimAl -> IQ-TREE -> ASTRAL-Pro)
-- Species with 0 or multiple copies are allowed (ASTRAL-Pro handles paralogs)
+- Selects orthogroups for phylogenomics
+- Species with 0 or multiple copies allowed (ASTRAL-Pro handles paralogs)
 - Outputs: selected `.fa` files + `filter_summary.tsv`
 
 ---
 
 # Gene Trees: phylo-slurm
 
-SLURM array job: MAFFT -> trimAl -> IQ-TREE per orthogroup in parallel
+Cap-and-resubmit SLURM array: MAFFT -> trimAl -> IQ-TREE per orthogroup
 
 ```bash
-# From filtered orthogroups
-fungalphylo phylo-slurm --submit /path/to/project
+# Generate orchestrator + worker scripts
+fungalphylo phylo-slurm /path/to/project
 
-# From explicit directory
-fungalphylo phylo-slurm --input-dir /path/to/fastas --submit /path/to/project
+# Run on login node
+bash runs/<run_id>/slurm/phylo_orchestrate.sh
+
+# Rerun after completion for remaining OGs
+bash runs/<run_id>/slurm/phylo_orchestrate.sh
 ```
 
-- Defaults: `--retree 2 --maxiterate 1000`, `-gt 0.8 -cons 10`, `-m TEST -B 1000 -alrt 1000`
-- 16 CPUs, 2G/cpu, 12h per task, max 380 concurrent (Puhti safe limit)
-- Output: `runs/<run_id>/gene_trees/<OG_ID>/`
+---
+
+# phylo-slurm: How It Works
+
+**Orchestrator** (login node script):
+
+- Checks which OGs already have a `.treefile`
+- Writes pending list, caps array to 380 tasks (Puhti limit)
+- Submits worker array job
+
+**Worker** (array job, one task per OG):
+
+- MAFFT `--retree 2 --maxiterate 1000` -> trimAl -> IQ-TREE `-m TEST`
+- Skips steps whose output already exists (step-level resume)
+- 16 CPUs, 2G/cpu, 12h per task
+
+Rerun the orchestrator to process remaining OGs (e.g., 7 runs for 2690 OGs).
 
 ---
 
@@ -293,29 +318,71 @@ For analyzing specific gene families (e.g., MFS sugar transporters):
 
 ```
 protsetphylo init -> interproscan -> select -> orthofinder-slurm
-    -> og-report -> og-apply -> [place-standalone] -> phylo-slurm
+  -> place-standalone -> og-report -> og-apply -> protsetphylo phylo-slurm
 ```
 
-Steps 1-3: Define family, annotate, select matching proteins
+- Define family with characterized proteins + target Pfam domains
+- Select matching proteins from project proteomes
+- OrthoFinder groups them into orthogroups
+- Inspect, curate, and build per-OG gene trees
 
-Steps 4-8: OrthoFinder -> inspect OGs -> select/merge -> place outgroup genes -> gene trees
+---
+
+# protsetphylo: Init + Select
+
+```bash
+# Initialize family with characterized proteins and Pfam targets
+fungalphylo protsetphylo init --family-id mfs_sugar \
+  --characterized proteins.tsv --pfam PF00083 /path/to/project
+
+# Run InterProScan on characterized set
+fungalphylo protsetphylo interproscan --family-id mfs_sugar \
+  --account project_xxx --submit /path/to/project
+
+# Select matching proteins from project proteomes
+fungalphylo protsetphylo select --family-id mfs_sugar \
+  --arch-mode flag /path/to/project
+```
+
+- E-value thresholds computed per Pfam from characterized set
+- Characterized proteins with `portal_id` replace best BLAST hits
+- Standalone proteins (no `portal_id`) separated for later HMM placement
+
+---
+
+# protsetphylo: Place Standalone
+
+Characterized genes without `portal_id` (outgroups) placed into OGs via HMM:
+
+```bash
+fungalphylo protsetphylo place-standalone --family-id mfs_sugar \
+  --run-id <of_run> --account project_xxx --submit /path/to/project
+```
+
+- Copies OG FASTAs to `og_placed/`, appends standalone genes
+- Builds HMM per OG, searches standalone sequences, best hit wins
+- Writes `placements.tsv` (used by og-report)
+- Keeps OrthoFinder output immutable
+- Skip if all characterized genes have portal IDs
 
 ---
 
 # protsetphylo: OG Report
-
-After OrthoFinder on selected proteins:
 
 ```bash
 fungalphylo protsetphylo og-report --family-id mfs_sugar \
   --run-id <of_run> /path/to/project
 ```
 
-Outputs in `families/mfs_sugar/og_report/`:
+Reports in `families/mfs_sugar/og_report/`:
 
-- Characterized x OG matrix (TSV + HTML): which characterized genes are in which OGs
-- Portal x OG matrix (TSV + HTML): gene counts per species, color-coded
-- `og_decisions.txt`: editable template for include/merge decisions
+- **Characterized x OG matrix** -- which characterized genes in which OGs
+  - Uses `portal_id|protein_name` labels
+  - Includes standalone genes from `placements.tsv`
+- **Portal x OG matrix** -- gene counts per species (color-coded)
+- **`og_decisions.txt`** -- editable template for OG selection
+
+Options: `--orientation vertical`, `--no-placed`
 
 ---
 
@@ -335,48 +402,81 @@ fungalphylo protsetphylo og-apply --family-id mfs_sugar \
   --run-id <of_run> /path/to/project
 ```
 
-- Copies included OGs as-is
-- Merges specified groups into single FASTAs
-- Output: `families/mfs_sugar/og_selected/` (ready for next step)
+- Reads from `og_placed/` by default (includes standalone placements)
+- Use `--no-placed` to force `Orthogroup_Sequences/`
+- Output: `families/mfs_sugar/og_selected/`
 
 ---
 
-# protsetphylo: Place Standalone (optional)
+# protsetphylo: Phylo-SLURM
 
-Characterized genes without `portal_id` (outgroups) are excluded from OrthoFinder. Place them into OGs using HMM profiles:
+Chained SLURM array jobs with per-step resource allocation:
 
 ```bash
-fungalphylo protsetphylo place-standalone --family-id mfs_sugar \
-  --account project_xxx --submit /path/to/project
+fungalphylo protsetphylo phylo-slurm --family-id mfs_sugar \
+  --account project_xxx /path/to/project
+
+# Then run:
+bash runs/<run_id>/slurm/phylo_orchestrate.sh
 ```
 
-- Aligns each OG with MAFFT, builds HMM profiles with hmmbuild
-- Searches standalone sequences against all profiles with hmmsearch
-- Appends each sequence to its best-matching OG
-- Skip if all characterized genes have portal IDs
+Orchestrator chains three submissions with `--dependency=afterok:`:
+
+| Step | Tool | Default resources |
+|------|------|-------------------|
+| align | MAFFT `--auto` | 8 CPUs, 4G/cpu, 4h |
+| trim | trimAl | 1 CPU, 4G, 15min |
+| tree | IQ-TREE `-m TEST` | 8 CPUs, 4G/cpu, 8h |
+
+- `--iqtree-fast` for quicker tree inference on large OGs
+- Per-step resources configurable: `--align-time`, `--tree-cpus`, etc.
+- Same cap-and-resubmit pattern as species tree phylo-slurm
+
+---
+
+# protsetphylo: Quick Path (Optional)
+
+For fast exploratory analysis without OrthoFinder:
+
+```bash
+# Build combined FASTA with clustering
+fungalphylo protsetphylo build-fasta --family-id mfs_sugar \
+  --redundancy-tool mmseqs2 --identity-threshold 0.3 /path/to/project
+
+# Single alignment + tree
+fungalphylo protsetphylo align --family-id mfs_sugar \
+  --account project_xxx --submit /path/to/project
+
+fungalphylo protsetphylo tree --family-id mfs_sugar \
+  --tree-method iqtree --account project_xxx --submit /path/to/project
+```
+
+- Useful for initial exploration before committing to full OG analysis
 
 ---
 
 # Tool Configuration: tools.yaml
 
 ```yaml
-busco:
-  bin_dir: "/path/to/busco/bin"
-  command: "busco"
 orthofinder:
-  env_activate: "/scratch/.../of3_env/bin/activate"
+  env_path: "/scratch/.../of2_tykky/bin"
   command: "orthofinder"
   msa_program: "mafft"
 mafft:
-  bin_dir: ""
   command: "mafft"
 trimal:
   bin_dir: "/path/to/trimal/bin"
   command: "trimal"
 iqtree:
-  bin_dir: ""
-  command: "iqtree3"
+  bin_dir: "/path/to/iqtree/bin"
+  command: "iqtree2"
+hmmer:
+  hmmbuild_cmd: "hmmbuild"
+  hmmsearch_cmd: "hmmsearch"
 ```
+
+- `bin_dir`/`env_path` set: SLURM script adds `export PATH=...`
+- Empty: script uses `module load <tool>` instead
 
 ---
 
@@ -387,11 +487,13 @@ iqtree:
 | `--dry-run` | stage, restore, download | Validate without side effects |
 | `--submit` | all SLURM commands | Submit job after writing script |
 | `--resume-run-id` | SLURM commands | Resume a timed-out run |
-| `--og-only` | orthofinder-slurm | Skip MSA/gene trees |
-| `--min-single-copy` | filter-orthogroups | Single-copy threshold |
-| `--max-concurrent` | phylo-slurm | Max parallel array tasks (default: 380) |
+| `--og-only` | orthofinder-slurm | Stop after OG sequences (`-M msa -os`) |
+| `--max-array-size` | phylo-slurm | Max tasks per submission (default: 380) |
+| `--max-concurrent` | phylo-slurm | Max parallel tasks (default: 100) |
+| `--iqtree-fast` | protsetphylo phylo-slurm | IQ-TREE fast mode |
+| `--no-placed` | og-report, og-apply | Ignore standalone placements |
+| `--force` | init, protsetphylo init | Overwrite existing project/family |
 | `--continue-on-error` | stage, restore, download | Don't stop on first failure |
-| `--no-confirm` | SLURM commands | Skip account prompt |
 
 ---
 
@@ -418,6 +520,7 @@ fungalphylo db query /path/to/project "SELECT * FROM portals"
 - **Immutable snapshots**: staging and runs never mutate prior directories
 - **Restart contract**: every command has rerun/skip/completion semantics
 - **Write-first**: SLURM scripts generated locally, submitted only with `--submit`
+- **Cap-and-resubmit**: array jobs capped to Puhti limits, rerun for remaining
 - **Artifact reuse**: equivalent artifacts shared across snapshots by cache key
 - **Batch resilience**: `--continue-on-error` for large batch operations
 
@@ -442,4 +545,33 @@ init -> ingest -> fetch-index -> autoselect -> review
                                    ASTRAL-Pro
 ```
 
-Gene family path: `protsetphylo init -> interproscan -> select -> orthofinder-slurm -> og-report -> og-apply -> [place-standalone] -> phylo-slurm`
+Gene family path:
+
+```
+protsetphylo init -> interproscan -> select -> orthofinder-slurm
+  -> place-standalone -> og-report -> og-apply -> protsetphylo phylo-slurm
+```
+
+---
+
+# Next Steps
+
+- **ASTRAL-Pro integration**: concatenate gene trees into species tree
+- **Automated tree QC**: detect long branches, rogue taxa, low-support clades
+- **Batch phylo-slurm monitoring**: command to check progress across array batches
+- **Gene tree reconciliation**: map gene trees to species tree for duplication/loss inference
+- **Visualization helpers**: export annotated trees for iTOL or FigTree
+- **Multi-family comparisons**: cross-family OG overlap and co-evolution analysis
+
+---
+
+# Thank You
+
+```
+pip install -e ".[dev]"
+fungalphylo --help
+```
+
+Repository: github.com/vimagora/fungalphylo
+
+Questions?

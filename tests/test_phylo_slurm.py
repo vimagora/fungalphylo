@@ -60,7 +60,7 @@ def _write_tools_yaml(paths: ProjectPaths) -> None:
     )
 
 
-def test_phylo_slurm_writes_array_script(tmp_path: Path, monkeypatch) -> None:
+def test_phylo_slurm_writes_orchestrator_and_worker(tmp_path: Path, monkeypatch) -> None:
     project_dir = tmp_path / "project"
     paths = _init_project(project_dir)
     _write_tools_yaml(paths)
@@ -82,40 +82,58 @@ def test_phylo_slurm_writes_array_script(tmp_path: Path, monkeypatch) -> None:
         ],
     )
     assert result.exit_code == 0, result.output
-    assert "Orthogroups: 3" in result.output
+    assert "Orthogroups:  3" in result.output
 
-    script_path = project_dir / "runs/phylo_test/slurm/phylo_array.sbatch"
-    assert script_path.exists()
+    # Both scripts written
+    orchestrator = project_dir / "runs/phylo_test/slurm/phylo_orchestrate.sh"
+    worker = project_dir / "runs/phylo_test/slurm/phylo_worker.sbatch"
+    assert orchestrator.exists()
+    assert worker.exists()
 
-    script = script_path.read_text(encoding="utf-8")
-    assert "--array=0-2%380" in script
-    assert "--cpus-per-task=16" in script
-    assert "--mem-per-cpu=2G" in script
-    assert "--time=12:00:00" in script
-    assert "--retree 2" in script
-    assert "--maxiterate 1000" in script
-    assert "-gt 0.8" in script
-    assert "-cons 10" in script
-    assert "-m TEST" in script
-    assert "-B 1000" in script
-    assert "-alrt 1000" in script
-    assert '"mafft"' in script
-    assert '"trimal"' in script
-    assert '"iqtree3"' in script
+    # Orchestrator references worker and filelist
+    orch_text = orchestrator.read_text(encoding="utf-8")
+    assert "phylo_worker.sbatch" in orch_text
+    assert "og_filelist.txt" in orch_text
+    assert "MAX_ARRAY_SIZE=380" in orch_text
+    assert "MAX_CONCURRENT=100" in orch_text
+    assert ".treefile" in orch_text  # checks for completion
+
+    # Worker has step-level resume and correct parameters
+    worker_text = worker.read_text(encoding="utf-8")
+    assert "--cpus-per-task=16" in worker_text
+    assert "--mem-per-cpu=2G" in worker_text
+    assert "--time=12:00:00" in worker_text
+    assert "--retree 2" in worker_text
+    assert "--maxiterate 1000" in worker_text
+    assert "-gt 0.8" in worker_text
+    assert "-cons 10" in worker_text
+    assert "-m TEST" in worker_text
+    assert "-B 1000" in worker_text
+    assert "-alrt 1000" in worker_text
+    assert '"mafft"' in worker_text
+    assert '"trimal"' in worker_text
+    assert '"iqtree3"' in worker_text
+    # Step-level resume: checks for existing output
+    assert '[ ! -s "$ALIGNED" ]' in worker_text
+    assert '[ ! -s "$TRIMMED" ]' in worker_text
+    assert "skipping MAFFT" in worker_text
+    assert "skipping trimAl" in worker_text
+    assert "skipping IQ-TREE" in worker_text
 
     # File list
     filelist = (project_dir / "runs/phylo_test/slurm/og_filelist.txt").read_text(encoding="utf-8")
-    lines = [l for l in filelist.strip().split("\n") if l]
+    lines = [line for line in filelist.strip().split("\n") if line]
     assert len(lines) == 3
-    assert all("OG000000" in l for l in lines)
+    assert all("OG000000" in line for line in lines)
 
     # Manifest
     manifest = json.loads(
         (project_dir / "runs/phylo_test/manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["kind"] == "phylo"
-    assert manifest["slurm"]["array_size"] == 3
-    assert manifest["slurm"]["max_concurrent"] == 380
+    assert manifest["slurm"]["total_ogs"] == 3
+    assert manifest["slurm"]["max_array_size"] == 380
+    assert manifest["slurm"]["max_concurrent"] == 100
     assert manifest["parameters"]["mafft_maxiterate"] == 1000
     assert manifest["parameters"]["iqtree_model"] == "TEST"
 
@@ -179,7 +197,7 @@ def test_phylo_slurm_explicit_input_dir(tmp_path: Path, monkeypatch) -> None:
         ],
     )
     assert result.exit_code == 0, result.output
-    assert "Orthogroups: 1" in result.output
+    assert "Orthogroups:  1" in result.output
 
 
 def test_phylo_slurm_custom_parameters(tmp_path: Path, monkeypatch) -> None:
@@ -204,7 +222,8 @@ def test_phylo_slurm_custom_parameters(tmp_path: Path, monkeypatch) -> None:
             "--trimal-gt", "0.5",
             "--iqtree-model", "LG+G4",
             "--iqtree-bootstrap", "2000",
-            "--max-concurrent", "100",
+            "--max-concurrent", "50",
+            "--max-array-size", "200",
             "--cpus", "8",
             "--mem-per-cpu", "4G",
             "--time", "24:00:00",
@@ -213,17 +232,22 @@ def test_phylo_slurm_custom_parameters(tmp_path: Path, monkeypatch) -> None:
     )
     assert result.exit_code == 0, result.output
 
-    script = (project_dir / "runs/phylo_params/slurm/phylo_array.sbatch").read_text(
+    worker = (project_dir / "runs/phylo_params/slurm/phylo_worker.sbatch").read_text(
         encoding="utf-8"
     )
-    assert "--maxiterate 500" in script
-    assert "-gt 0.5" in script
-    assert "-m LG+G4" in script
-    assert "-B 2000" in script
-    assert "%100" in script
-    assert "--cpus-per-task=8" in script
-    assert "--mem-per-cpu=4G" in script
-    assert "--time=24:00:00" in script
+    assert "--maxiterate 500" in worker
+    assert "-gt 0.5" in worker
+    assert "-m LG+G4" in worker
+    assert "-B 2000" in worker
+    assert "--cpus-per-task=8" in worker
+    assert "--mem-per-cpu=4G" in worker
+    assert "--time=24:00:00" in worker
+
+    orch = (project_dir / "runs/phylo_params/slurm/phylo_orchestrate.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "MAX_CONCURRENT=50" in orch
+    assert "MAX_ARRAY_SIZE=200" in orch
 
 
 def test_phylo_slurm_submit_mocked(tmp_path: Path, monkeypatch) -> None:
@@ -236,7 +260,7 @@ def test_phylo_slurm_submit_mocked(tmp_path: Path, monkeypatch) -> None:
 
     def _fake_run(args, check, capture_output, text):
         calls.append(args)
-        return SimpleNamespace(stdout="Submitted batch job 99999\n")
+        return SimpleNamespace(stdout="Submitted job 99999\n")
 
     monkeypatch.setattr("fungalphylo.cli.commands.phylo_slurm.subprocess.run", _fake_run)
 
@@ -252,9 +276,8 @@ def test_phylo_slurm_submit_mocked(tmp_path: Path, monkeypatch) -> None:
         ],
     )
     assert result.exit_code == 0, result.output
-    assert "Submitted batch job 99999" in result.output
     assert len(calls) == 1
-    assert "sbatch" in calls[0][0]
+    assert "bash" in calls[0][0]
 
 
 def test_phylo_slurm_no_filtered_ogs_errors(tmp_path: Path) -> None:
