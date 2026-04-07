@@ -202,7 +202,7 @@ def phylo_slurm_command(
         help="Run ID for this phylo run (default: phylo_<timestamp>).",
     ),
     time: str | None = typer.Option(None, "--time", help="SLURM time per task (default: 12:00:00)"),
-    cpus: int | None = typer.Option(None, "--cpus", help="CPUs per task (default: 16)"),
+    cpus: int | None = typer.Option(None, "--cpus", help="CPUs per task (default: 8)"),
     mem_per_cpu: str | None = typer.Option(
         None, "--mem-per-cpu", help="Memory per CPU (default: 2G)"
     ),
@@ -300,7 +300,7 @@ def phylo_slurm_command(
     # Defaults
     rid = output_run_id or f"phylo_{now_tag()}"
     time = time or "12:00:00"
-    cpus = cpus if cpus is not None else 16
+    cpus = cpus if cpus is not None else 8
     mem_per_cpu = mem_per_cpu or "2G"
     partition = partition or "small"
     max_concurrent = max_concurrent if max_concurrent is not None else 100

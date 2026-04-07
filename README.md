@@ -76,7 +76,7 @@ project/
 ### 1. Initialize a project
 
 ```bash
-fungalphylo init /path/to/project --force
+fungalphylo init --force /path/to/project
 ```
 
 ### 2. Ingest portal list
@@ -84,7 +84,7 @@ fungalphylo init /path/to/project --force
 Import a MycoCosm spreadsheet (XLSX with hyperlinked `Name` and `Published` columns):
 
 ```bash
-fungalphylo ingest /path/to/project --table mycocosm_portals.xlsx
+fungalphylo ingest --table mycocosm_portals.xlsx /path/to/project
 ```
 
 ### 3. Fetch file index from JGI
@@ -92,9 +92,9 @@ fungalphylo ingest /path/to/project --table mycocosm_portals.xlsx
 ```bash
 fungalphylo fetch-index /path/to/project
 # Single portal
-fungalphylo fetch-index /path/to/project --portal-id Dicsqu464_2
+fungalphylo fetch-index --portal-id Dicsqu464_2 /path/to/project
 # From cached JSON only (no network)
-fungalphylo fetch-index /path/to/project --ingest-from-cache
+fungalphylo fetch-index --ingest-from-cache /path/to/project
 ```
 
 ### 4. Auto-select best proteome + CDS
@@ -111,20 +111,20 @@ Outputs `review/autoselect_<ts>.tsv` and `review/autoselect_explain_<ts>.tsv`.
 
 ```bash
 # Export editable TSV
-fungalphylo review export /path/to/project --from-autoselect review/autoselect_<ts>.tsv
+fungalphylo review export --from-autoselect review/autoselect_<ts>.tsv /path/to/project
 
 # Edit review_edit_<ts>.tsv: change file IDs, set approve=no to exclude portals
 
 # Apply approvals to DB
-fungalphylo review apply /path/to/project review/review_edit_<ts>.tsv
+fungalphylo review apply review/review_edit_<ts>.tsv /path/to/project
 ```
 
 ### 6. Restore files (can take hours/days)
 
 ```bash
-fungalphylo restore /path/to/project --send-mail
+fungalphylo restore --send-mail /path/to/project
 # Preview without posting
-fungalphylo restore /path/to/project --dry-run
+fungalphylo restore --dry-run /path/to/project
 ```
 
 Payloads are chunked to stay under backend character limits. Use `--continue-on-error` for large batches.
@@ -134,7 +134,7 @@ Payloads are chunked to stay under backend character limits. Use `--continue-on-
 ```bash
 fungalphylo download /path/to/project
 # Skip already-downloaded files
-fungalphylo download /path/to/project --skip-if-raw-present
+fungalphylo download --skip-if-raw-present /path/to/project
 ```
 
 Downloads are saved to `raw/<portal_id>/<file_id>/<filename>`.
@@ -144,7 +144,7 @@ Downloads are saved to `raw/<portal_id>/<file_id>/<filename>`.
 Creates an immutable snapshot with canonical headers (`{portal_id}|{jgi_protein_id}`):
 
 ```bash
-fungalphylo stage /path/to/project --dry-run   # Preview
+fungalphylo stage --dry-run /path/to/project    # Preview
 fungalphylo stage /path/to/project              # Create snapshot
 ```
 
@@ -170,10 +170,10 @@ Sequences with internal stop codons (asterisks not at the end) are handled by `-
 fungalphylo stage /path/to/project
 
 # Keep sequences but log warnings
-fungalphylo stage /path/to/project --internal-stop warn
+fungalphylo stage --internal-stop warn /path/to/project
 
 # Strip internal stop codons
-fungalphylo stage /path/to/project --internal-stop strip
+fungalphylo stage --internal-stop strip /path/to/project
 ```
 
 Trailing stop codons (`*` at sequence end) are always stripped regardless of mode.
@@ -190,13 +190,13 @@ Quality control on staged proteomes:
 
 ```bash
 # Generate SLURM script (latest staging by default)
-fungalphylo busco-slurm /path/to/project --staging-id <staging_id>
+fungalphylo busco-slurm --staging-id <staging_id> /path/to/project
 
 # Resume a timed-out run with more time
-fungalphylo busco-slurm /path/to/project --resume-run-id <run_id> --time 48:00:00 --submit
+fungalphylo busco-slurm --resume-run-id <run_id> --time 48:00:00 --submit /path/to/project
 
 # Import results after completion
-fungalphylo busco ingest-results /path/to/project --run-id <run_id>
+fungalphylo busco ingest-results --run-id <run_id> /path/to/project
 ```
 
 Use `--submit` only on systems with `sbatch`. The generated script checks for prior completion and exits early if already done.
@@ -209,13 +209,13 @@ Domain annotation on staged proteomes:
 
 ```bash
 # Generate launcher + worker scripts
-fungalphylo interproscan-slurm /path/to/project --application PfamA
+fungalphylo interproscan-slurm --application PfamA /path/to/project
 
 # Resume after timeout
-fungalphylo interproscan-slurm /path/to/project --resume-run-id <run_id> --submit
+fungalphylo interproscan-slurm --resume-run-id <run_id> --submit /path/to/project
 
 # Debug with subset
-fungalphylo interproscan-slurm /path/to/project --limit 5
+fungalphylo interproscan-slurm --limit 5 /path/to/project
 ```
 
 The launcher runs a submit-and-poll controller (one worker at a time to respect Puhti job limits). The worker loads `biokit` and `interproscan` modules. Failed sequences are automatically retried on resume.
@@ -228,25 +228,25 @@ Orthogroup inference on staged proteomes or gene family selections:
 
 ```bash
 # Orthogroups only (recommended — skips expensive MSA/gene trees)
-fungalphylo orthofinder-slurm /path/to/project --og-only --submit
+fungalphylo orthofinder-slurm --og-only --submit /path/to/project
 
 # Full analysis with MSA-based gene trees and species tree
-fungalphylo orthofinder-slurm /path/to/project --submit
+fungalphylo orthofinder-slurm --submit /path/to/project
 
 # Target a specific staging snapshot
-fungalphylo orthofinder-slurm /path/to/project --og-only --staging-id <staging_id> --submit
+fungalphylo orthofinder-slurm --og-only --staging-id <staging_id> --submit /path/to/project
 
 # Run on a gene family's selected FASTAs instead of full proteomes
-fungalphylo orthofinder-slurm /path/to/project --og-only --family-id mfs_sugar --submit
+fungalphylo orthofinder-slurm --og-only --family-id mfs_sugar --submit /path/to/project
 
 # Run on an explicit directory of .faa files
-fungalphylo orthofinder-slurm /path/to/project --og-only --input-dir /path/to/fastas --submit
+fungalphylo orthofinder-slurm --og-only --input-dir /path/to/fastas --submit /path/to/project
 
 # Resume a timed-out run (reuses DIAMOND results)
-fungalphylo orthofinder-slurm /path/to/project --resume-run-id <run_id> --submit
+fungalphylo orthofinder-slurm --resume-run-id <run_id> --submit /path/to/project
 
 # Override MSA program (default: mafft; famsa may crash on some systems)
-fungalphylo orthofinder-slurm /path/to/project --msa-program mafft --submit
+fungalphylo orthofinder-slurm --msa-program mafft --submit /path/to/project
 ```
 
 **`--og-only`** adds `-M msa -os` which stops after writing orthogroup sequences, skipping gene tree and species tree inference. This is the recommended mode when you plan to build gene trees yourself with `phylo-slurm`.
@@ -275,16 +275,10 @@ After OrthoFinder completes, filter orthogroups by single-copy species occupancy
 fungalphylo filter-orthogroups /path/to/project
 
 # Explicit run ID
-fungalphylo filter-orthogroups /path/to/project --run-id <run_id>
+fungalphylo filter-orthogroups --run-id <run_id> /path/to/project
 
 # Custom threshold (e.g., 80%)
-fungalphylo filter-orthogroups /path/to/project --min-single-copy 0.80
-
-# Point at OrthoFinder results directly
-fungalphylo filter-orthogroups /path/to/project --results-dir /path/to/orthofinder_results
-
-# Custom output directory
-fungalphylo filter-orthogroups /path/to/project --output-dir /path/to/output
+fungalphylo filter-orthogroups --min-single-copy 0.80 /path/to/project
 ```
 
 An orthogroup passes if at least `--min-single-copy` fraction of species have exactly 1 gene in the OG. Species with 0 or multiple copies are allowed — ASTRAL-Pro handles paralogs.
@@ -308,19 +302,17 @@ bash runs/<run_id>/slurm/phylo_orchestrate.sh
 # Rerun after completion to process remaining OGs
 
 # Or generate + submit in one step
-fungalphylo phylo-slurm /path/to/project --submit
+fungalphylo phylo-slurm --submit /path/to/project
 
 # From a specific OrthoFinder run
-fungalphylo phylo-slurm /path/to/project --run-id <orthofinder_run_id>
-
-# From an explicit directory of .fa files
-fungalphylo phylo-slurm /path/to/project --input-dir /path/to/fastas
+fungalphylo phylo-slurm --run-id <orthofinder_run_id> /path/to/project
 
 # Custom parameters
-fungalphylo phylo-slurm /path/to/project \
+fungalphylo phylo-slurm \
   --mafft-maxiterate 500 --trimal-gt 0.5 \
   --iqtree-model LG+G4 --iqtree-bootstrap 2000 \
-  --max-array-size 200 --max-concurrent 50
+  --max-array-size 200 --max-concurrent 50 \
+  /path/to/project
 ```
 
 Default parameters per array task:
@@ -362,10 +354,11 @@ The recommended path uses OrthoFinder on the per-species FASTAs from `select`. I
 Provide a TSV of characterized proteins and target Pfam accessions:
 
 ```bash
-fungalphylo protsetphylo init /path/to/project \
+fungalphylo protsetphylo init \
   --family-id mfs_sugar \
   --characterized characterized_proteins.tsv \
-  --pfam PF00083
+  --pfam PF00083 \
+  /path/to/project
 ```
 
 The characterized TSV must have columns: `portal_id`, `species`, `short_name`, `protein_name`, `sequence`. Optional: `protein_id`, `group_*`, `references`.
@@ -379,10 +372,9 @@ Creates `families/<family_id>/` with preserved TSV, generated FASTA, and Pfam co
 #### 2. Run InterProScan on characterized proteins
 
 ```bash
-fungalphylo protsetphylo interproscan /path/to/project \
+fungalphylo protsetphylo interproscan \
   --family-id mfs_sugar \
-  --account project_xxx \
-  --submit
+  --submit /path/to/project
 ```
 
 Generates a SLURM script to run InterProScan on the characterized FASTA. Results go to `families/<family_id>/characterized/interproscan/`.
@@ -391,9 +383,10 @@ Generates a SLURM script to run InterProScan on the characterized FASTA. Results
 
 ```bash
 module load blast
-fungalphylo protsetphylo select /path/to/project \
+fungalphylo protsetphylo select \
   --family-id mfs_sugar \
-  --arch-mode flag
+  --arch-mode flag \
+  /path/to/project 
 ```
 
 Selection logic:
@@ -414,8 +407,8 @@ Output: per-species FASTAs in `families/<family_id>/selected/` plus `selection_r
 #### 4. OrthoFinder on selected proteins
 
 ```bash
-fungalphylo orthofinder-slurm /path/to/project \
-  --family-id mfs_sugar --og-only --submit
+fungalphylo orthofinder-slurm \
+  --family-id mfs_sugar --og-only --submit /path/to/project 
 ```
 
 Runs OrthoFinder on `families/mfs_sugar/selected/` to identify orthogroups via MCL clustering.
@@ -425,9 +418,9 @@ Runs OrthoFinder on `families/mfs_sugar/selected/` to identify orthogroups via M
 If some characterized genes have no `portal_id` (e.g., outgroup species), they were excluded from OrthoFinder. Place them into OGs using HMM profiles **before** generating reports:
 
 ```bash
-fungalphylo protsetphylo place-standalone /path/to/project \
+fungalphylo protsetphylo place-standalone \
   --family-id mfs_sugar --run-id <orthofinder_run_id> \
-  --account project_xxx --submit
+  --submit /path/to/project
 ```
 
 Generates a SLURM script that:
@@ -442,16 +435,19 @@ Requires HMMER (on Puhti: `module load biokit`). Skip this step if all character
 #### 6. Inspect orthogroups with `og-report`
 
 ```bash
-fungalphylo protsetphylo og-report /path/to/project \
-  --family-id mfs_sugar --run-id <orthofinder_run_id>
+fungalphylo protsetphylo og-report \
+  --family-id mfs_sugar --run-id <orthofinder_run_id> \
+  /path/to/project
 
 # Vertical orientation (OGs as columns, portals/proteins as rows)
-fungalphylo protsetphylo og-report /path/to/project \
-  --family-id mfs_sugar --orientation vertical
+fungalphylo protsetphylo og-report \
+  --family-id mfs_sugar --orientation vertical \
+  /path/to/project
 
 # Ignore placements (only show genes from Orthogroups.tsv)
-fungalphylo protsetphylo og-report /path/to/project \
-  --family-id mfs_sugar --no-placed
+fungalphylo protsetphylo og-report \
+  --family-id mfs_sugar --no-placed \
+  /path/to/project
 ```
 
 Generates reports in `families/mfs_sugar/og_report/`:
@@ -473,12 +469,16 @@ merge: OG0000002,OG0000003;OG0000004,OG0000006
 The above keeps OG0000001 and OG0000005 as-is, merges OG0000002+OG0000003 into one FASTA, and merges OG0000004+OG0000006 into another.
 
 ```bash
-fungalphylo protsetphylo og-apply /path/to/project \
-  --family-id mfs_sugar --run-id <orthofinder_run_id>
+fungalphylo protsetphylo og-apply \
+  --family-id mfs_sugar  \
+  --run-id <orthofinder_run_id> \
+  /path/to/project
 
 # Force reading from Orthogroup_Sequences/ instead of og_placed/
-fungalphylo protsetphylo og-apply /path/to/project \
-  --family-id mfs_sugar --run-id <orthofinder_run_id> --no-placed
+fungalphylo protsetphylo og-apply \
+  --family-id mfs_sugar \
+  --run-id <orthofinder_run_id> \
+  --no-placed /path/to/project
 ```
 
 By default, `og-apply` reads from `og_placed/` (which includes standalone genes) if it exists, otherwise falls back to `Orthogroup_Sequences/`. Use `--no-placed` to force the fallback.
@@ -491,26 +491,28 @@ Chained SLURM array jobs with per-step resource allocation, designed for large O
 
 ```bash
 # Generate scripts (auto-detects og_placed/ > og_selected/)
-fungalphylo protsetphylo phylo-slurm /path/to/project \
-  --family-id mfs_sugar --account project_xxx
+fungalphylo protsetphylo phylo-slurm \
+  --family-id mfs_sugar /path/to/project
 
 # Then run on login node:
 bash runs/<run_id>/slurm/phylo_orchestrate.sh
 # Rerun after completion to process remaining OGs
 
 # Or generate + submit in one step
-fungalphylo protsetphylo phylo-slurm /path/to/project \
-  --family-id mfs_sugar --account project_xxx --submit
+fungalphylo protsetphylo phylo-slurm \
+  --family-id mfs_sugar --submit \
+  /path/to/project
 
 # With IQ-TREE fast mode for quicker inference
-fungalphylo protsetphylo phylo-slurm /path/to/project \
-  --family-id mfs_sugar --account project_xxx --iqtree-fast
+fungalphylo protsetphylo phylo-slurm \
+  --family-id mfs_sugar --iqtree-fast \
+  /path/to/project
 
 # Custom per-step resources (e.g., for very large OGs)
-fungalphylo protsetphylo phylo-slurm /path/to/project \
-  --family-id mfs_sugar --account project_xxx \
-  --align-time 06:00:00 --align-cpus 16 \
-  --tree-time 24:00:00 --tree-mem-per-cpu 8G
+fungalphylo protsetphylo phylo-slurm \
+  --family-id mfs_sugar --align-time 06:00:00\
+  --align-cpus 16 --tree-time 24:00:00\
+  --tree-mem-per-cpu 8G /path/to/project
 ```
 
 **How it works**: The orchestrator chains three array submissions with `--dependency=afterok:`, each with different SLURM resources:
@@ -537,15 +539,16 @@ For fast exploratory analysis without OrthoFinder:
 
 ```bash
 # Merge all selected into one FASTA (no clustering)
-fungalphylo protsetphylo build-fasta /path/to/project \
-  --family-id mfs_sugar
+fungalphylo protsetphylo build-fasta \
+  --family-id mfs_sugar /path/to/project
 
 # Or with MMseqs2/CD-HIT clustering for subfamily splitting
 module load mmseqs2
-fungalphylo protsetphylo build-fasta /path/to/project \
+fungalphylo protsetphylo build-fasta \
   --family-id mfs_sugar \
   --redundancy-tool mmseqs2 \
-  --identity-threshold 0.3
+  --identity-threshold 0.3 \
+  /path/to/project
 ```
 
 When using a redundancy tool, outputs include:
@@ -558,10 +561,9 @@ When using a redundancy tool, outputs include:
 #### 5. Align
 
 ```bash
-fungalphylo protsetphylo align /path/to/project \
+fungalphylo protsetphylo align \
   --family-id mfs_sugar \
-  --account project_xxx \
-  --submit
+  --submit /path/to/project
 ```
 
 Generates a SLURM script that runs MAFFT then trimAl. Configurable parameters:
@@ -580,18 +582,16 @@ Outputs in `families/<family_id>/alignment/`.
 
 ```bash
 # IQ-TREE (refined, slower)
-fungalphylo protsetphylo tree /path/to/project \
+fungalphylo protsetphylo tree \
   --family-id mfs_sugar \
   --tree-method iqtree \
-  --account project_xxx \
-  --submit
+  --submit /path/to/project
 
 # FastTree (exploratory, fast)
-fungalphylo protsetphylo tree /path/to/project \
+fungalphylo protsetphylo tree \
   --family-id mfs_sugar \
   --tree-method fasttree \
-  --account project_xxx \
-  --submit
+  --submit /path/to/project
 ```
 
 IQ-TREE defaults: `-m MFP -bb 1000 -nt AUTO`. Override with `--model` and `--bootstrap`. Use `--input-alignment` to point at a specific alignment (e.g., per-cluster). Output in `families/<family_id>/tree/`.
@@ -645,12 +645,12 @@ families/<family_id>/
 fungalphylo taxonomy fetch-ncbi /path/to/project
 
 # Export/edit/apply taxonomy mapping
-fungalphylo taxonomy export /path/to/project --approved-only --out review/portal_taxonomy.tsv
-fungalphylo taxonomy apply /path/to/project review/portal_taxonomy.tsv
+fungalphylo taxonomy export --approved-only --out review/portal_taxonomy.tsv /path/to/project
+fungalphylo taxonomy apply review/portal_taxonomy.tsv /path/to/project
 
 # Generate BUSCO QC report ordered by taxonomy
-fungalphylo busco ingest-results /path/to/project --run-id <run_id>
-fungalphylo taxonomy busco-mockup /path/to/project --summary-rank family
+fungalphylo busco ingest-results --run-id <run_id> /path/to/project
+fungalphylo taxonomy busco-mockup --summary-rank family /path/to/project
 ```
 
 ---

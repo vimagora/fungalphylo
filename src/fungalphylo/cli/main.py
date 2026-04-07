@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import typer
 
+from fungalphylo.cli.commands import astral_slurm as astral_slurm_cmd
 from fungalphylo.cli.commands import autoselect as autoselect_cmd
 from fungalphylo.cli.commands import busco as busco_cmd
 from fungalphylo.cli.commands import busco_slurm as busco_slurm_cmd
@@ -43,6 +44,7 @@ app.add_typer(interproscan_slurm_cmd.app, name="interproscan-slurm")
 app.add_typer(orthofinder_slurm_cmd.app, name="orthofinder-slurm")
 app.add_typer(filter_orthogroups_cmd.app, name="filter-orthogroups")
 app.add_typer(phylo_slurm_cmd.app, name="phylo-slurm")
+app.add_typer(astral_slurm_cmd.app, name="astral-slurm")
 app.add_typer(protsetphylo_cmd.app, name="protsetphylo")
 
 

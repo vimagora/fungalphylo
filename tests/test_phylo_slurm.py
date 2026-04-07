@@ -100,7 +100,7 @@ def test_phylo_slurm_writes_orchestrator_and_worker(tmp_path: Path, monkeypatch)
 
     # Worker has step-level resume and correct parameters
     worker_text = worker.read_text(encoding="utf-8")
-    assert "--cpus-per-task=16" in worker_text
+    assert "--cpus-per-task=8" in worker_text
     assert "--mem-per-cpu=2G" in worker_text
     assert "--time=12:00:00" in worker_text
     assert "--retree 2" in worker_text

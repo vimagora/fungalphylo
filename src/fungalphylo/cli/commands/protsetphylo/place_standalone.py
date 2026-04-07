@@ -206,7 +206,7 @@ def place_standalone_command(
     ),
     time: str | None = typer.Option(None, "--time", help="SLURM time (default: 02:00:00)"),
     cpus: int | None = typer.Option(None, "--cpus", help="CPUs per task (default: 8)"),
-    mem_per_cpu: str | None = typer.Option(None, "--mem-per-cpu", help="Memory per CPU (default: 2G)"),
+    mem_per_cpu: str | None = typer.Option(None, "--mem-per-cpu", help="Memory per CPU (default: 4G)"),
     partition: str | None = typer.Option(None, "--partition", help="SLURM partition"),
     account: str | None = typer.Option(None, "--account", help="SLURM account"),
     no_confirm: bool = typer.Option(False, "--no-confirm", help="Skip account confirmation"),
@@ -260,7 +260,7 @@ def place_standalone_command(
     rid = f"place_{family_id}_{now_tag()}"
     time = time or "02:00:00"
     cpus = cpus if cpus is not None else 8
-    mem_per_cpu = mem_per_cpu or "2G"
+    mem_per_cpu = mem_per_cpu or "4G"
     partition = partition or "small"
 
     # Work directory within the family
