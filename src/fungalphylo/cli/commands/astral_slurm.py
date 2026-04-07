@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from collections import defaultdict
 from pathlib import Path
 
+import dendropy
 import typer
 
 from fungalphylo.core.events import log_event
@@ -18,7 +18,7 @@ from fungalphylo.core.tools import load_tools
 from fungalphylo.db.db import connect, init_db
 
 app = typer.Typer(
-    help="Collect gene trees, build species mapping, and generate ASTRAL-Pro SLURM script."
+    help="Collect gene trees, rename tips to species, and generate ASTRAL-Pro SLURM script."
 )
 
 # Match tip labels in Newick: any run of characters that isn't (),:; or whitespace
@@ -30,16 +30,20 @@ def _extract_tips(newick: str) -> list[str]:
     return _TIP_RE.findall(newick)
 
 
-def _build_species_map(
-    tips: set[str], delimiter: str
-) -> dict[str, list[str]]:
-    """Map species name -> list of gene labels by splitting on delimiter."""
-    species_map: dict[str, list[str]] = defaultdict(list)
-    for tip in sorted(tips):
-        parts = tip.split(delimiter, 1)
-        species = parts[0]
-        species_map[species].append(tip)
-    return dict(species_map)
+def _rename_tips_to_species(newick: str, delimiter: str) -> tuple[str, set[str]]:
+    """Rename tip labels to species names using dendropy.
+
+    Returns (renamed_newick, set_of_species_names).
+    """
+    tree = dendropy.Tree.get(data=newick, schema="newick")
+    species: set[str] = set()
+    for leaf in tree.leaf_node_iter():
+        label = leaf.taxon.label
+        sp = label.split(delimiter, 1)[0]
+        leaf.taxon.label = sp
+        species.add(sp)
+    renamed = tree.as_string(schema="newick").strip()
+    return renamed, species
 
 
 def _render_astral_script(
@@ -52,7 +56,6 @@ def _render_astral_script(
     mem: str,
     partition: str,
     gene_trees_file: Path,
-    mapping_file: Path,
     output_tree: Path,
     astral_cmd: str,
     extra_args: str,
@@ -73,12 +76,10 @@ module load aster/1.23
 
 echo "=== ASTRAL-Pro ==="
 echo "Gene trees: {gene_trees_file.as_posix()}"
-echo "Mapping:    {mapping_file.as_posix()}"
 echo "Output:     {output_tree.as_posix()}"
 
 {astral_cmd} \\
   -i "{gene_trees_file.as_posix()}" \\
-  -a "{mapping_file.as_posix()}" \\
   -o "{output_tree.as_posix()}" \\
   {extra_args}
 
@@ -191,8 +192,8 @@ def astral_slurm_command(
     for d in (slurm_dir, logs_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    # Collect gene trees, extract tips, filter by min_taxa
-    all_tips: set[str] = set()
+    # Collect gene trees, rename tips to species, filter by min_taxa
+    all_species: set[str] = set()
     kept_trees: list[str] = []
     skipped = 0
 
@@ -202,13 +203,15 @@ def astral_slurm_command(
             skipped += 1
             continue
         tips = _extract_tips(newick)
-        # Count unique species
+        # Count unique species before renaming
         species = {t.split(delimiter, 1)[0] for t in tips}
         if len(species) < min_taxa:
             skipped += 1
             continue
-        all_tips.update(tips)
-        kept_trees.append(newick)
+        # Rename tips to species names using dendropy
+        renamed, tree_species = _rename_tips_to_species(newick, delimiter)
+        all_species.update(tree_species)
+        kept_trees.append(renamed)
 
     if not kept_trees:
         raise typer.BadParameter(
@@ -216,27 +219,16 @@ def astral_slurm_command(
             f"({len(tree_files)} trees found, all skipped)."
         )
 
-    # Write concatenated gene trees
+    # Write concatenated gene trees (tips already renamed to species)
     gene_trees_file = slurm_dir / "gene_trees.nwk"
     gene_trees_file.write_text(
         "\n".join(kept_trees) + "\n", encoding="utf-8"
     )
 
-    # Build and write species mapping
-    species_map = _build_species_map(all_tips, delimiter)
-    mapping_file = slurm_dir / "species_map.txt"
-    mapping_lines = []
-    for species in sorted(species_map):
-        genes = ", ".join(species_map[species])
-        mapping_lines.append(f"{species}: {genes}")
-    mapping_file.write_text(
-        "\n".join(mapping_lines) + "\n", encoding="utf-8"
-    )
-
     # Output tree path
     output_tree = run_root / "species_tree.nwk"
 
-    # Generate SLURM script
+    # Generate SLURM script (no mapping file needed — tips are species names)
     script = _render_astral_script(
         acct=acct,
         rid=rid,
@@ -246,7 +238,6 @@ def astral_slurm_command(
         mem=mem,
         partition=partition,
         gene_trees_file=gene_trees_file,
-        mapping_file=mapping_file,
         output_tree=output_tree,
         astral_cmd=astral_cmd,
         extra_args=extra_args,
@@ -268,7 +259,6 @@ def astral_slurm_command(
             "run_dir": str(run_root.relative_to(project_dir)),
             "script": str(script_path.relative_to(project_dir)),
             "gene_trees": str(gene_trees_file.relative_to(project_dir)),
-            "mapping": str(mapping_file.relative_to(project_dir)),
             "output_tree": str(output_tree.relative_to(project_dir)),
         },
         "parameters": {
@@ -281,8 +271,7 @@ def astral_slurm_command(
             "total_tree_files": len(tree_files),
             "kept_trees": len(kept_trees),
             "skipped_trees": skipped,
-            "total_tips": len(all_tips),
-            "total_species": len(species_map),
+            "total_species": len(all_species),
         },
         "slurm": {
             "account": acct,
@@ -330,7 +319,7 @@ def astral_slurm_command(
             "source_run_id": source_run_id,
             "kept_trees": len(kept_trees),
             "skipped_trees": skipped,
-            "total_species": len(species_map),
+            "total_species": len(all_species),
             "script": str(script_path),
             "submit": submit,
         },
@@ -338,12 +327,11 @@ def astral_slurm_command(
 
     typer.echo(f"ASTRAL-Pro preparation complete:")
     typer.echo(f"  Gene trees:   {len(kept_trees)} kept, {skipped} skipped (of {len(tree_files)})")
-    typer.echo(f"  Species:      {len(species_map)}")
-    typer.echo(f"  Tips:         {len(all_tips)}")
+    typer.echo(f"  Species:      {len(all_species)}")
     typer.echo(f"  Trees file:   {gene_trees_file}")
-    typer.echo(f"  Mapping file: {mapping_file}")
     typer.echo(f"  SLURM script: {script_path}")
     typer.echo(f"  Output tree:  {output_tree}")
+    typer.echo(f"  Tips renamed to species (no mapping file needed)")
 
     if submit:
         try:

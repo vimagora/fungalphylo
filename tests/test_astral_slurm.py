@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
-from fungalphylo.cli.commands.astral_slurm import _extract_tips, _build_species_map
+from fungalphylo.cli.commands.astral_slurm import _extract_tips, _rename_tips_to_species
 from fungalphylo.cli.main import app
 from fungalphylo.core.paths import ProjectPaths
 from fungalphylo.db.db import connect
@@ -63,12 +63,15 @@ def test_extract_tips_with_branch_lengths() -> None:
     assert sorted(tips) == ["A|p1", "B|p2", "C|p3", "D|p4"]
 
 
-def test_build_species_map() -> None:
-    tips = {"SpA|p1", "SpA|p2", "SpB|p3", "SpC|p4"}
-    smap = _build_species_map(tips, "|")
-    assert sorted(smap.keys()) == ["SpA", "SpB", "SpC"]
-    assert smap["SpA"] == ["SpA|p1", "SpA|p2"]
-    assert smap["SpB"] == ["SpB|p3"]
+def test_rename_tips_to_species() -> None:
+    newick = "((SpA|p1:0.1,SpB|p2:0.2):0.5,(SpC|p3:0.3,SpA|p4:0.4):0.6);"
+    renamed, species = _rename_tips_to_species(newick, "|")
+    assert sorted(species) == ["SpA", "SpB", "SpC"]
+    # Tips should be species names, not full labels
+    assert "SpA|p1" not in renamed
+    assert "SpA" in renamed
+    assert "SpB" in renamed
+    assert "SpC" in renamed
 
 
 # --- Integration tests ---
@@ -103,27 +106,28 @@ def test_astral_prep_collects_trees_and_writes_mapping(tmp_path: Path, monkeypat
     assert "3 kept" in result.output
     assert "Species:      4" in result.output
 
-    # Gene trees file
+    # Gene trees file — tips should be species names only
     gt_file = project_dir / "runs/astral_test/slurm/gene_trees.nwk"
     assert gt_file.exists()
-    lines = [l for l in gt_file.read_text(encoding="utf-8").strip().split("\n") if l]
+    gt_text = gt_file.read_text(encoding="utf-8")
+    lines = [l for l in gt_text.strip().split("\n") if l]
     assert len(lines) == 3
+    # Verify tips were renamed: species names present, full labels gone
+    assert "SpA" in gt_text
+    assert "SpB" in gt_text
+    assert "|p1" not in gt_text
+    assert "|p2" not in gt_text
 
-    # Species mapping
+    # No mapping file (tips renamed instead)
     mapping = project_dir / "runs/astral_test/slurm/species_map.txt"
-    assert mapping.exists()
-    mapping_text = mapping.read_text(encoding="utf-8")
-    assert "SpA:" in mapping_text
-    assert "SpB:" in mapping_text
-    assert "SpC:" in mapping_text
-    assert "SpD:" in mapping_text
+    assert not mapping.exists()
 
     # SLURM script
     script = (project_dir / "runs/astral_test/slurm/astral.sbatch").read_text(encoding="utf-8")
     assert "module load aster/1.23" in script
     assert "astral-pro3" in script
     assert "gene_trees.nwk" in script
-    assert "species_map.txt" in script
+    assert "species_map.txt" not in script
     assert "species_tree.nwk" in script
 
     # Manifest

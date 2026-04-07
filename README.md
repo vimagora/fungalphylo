@@ -359,7 +359,7 @@ fungalphylo astral-slurm \
   /path/to/project
 ```
 
-**How it works**: Tip labels in gene trees use the format `species|protein_id`. The command splits on the delimiter (`|` by default) to extract species names, builds a mapping file (`species: gene1, gene2, ...`), and filters out trees with fewer than `--min-taxa` species (default 4). On Puhti, it loads `module load aster/1.23` and runs `astral-pro3`.
+**How it works**: Tip labels in gene trees use the format `species|protein_id`. The command uses dendropy to rename tips to just the species name (stripping the protein ID) before writing the concatenated tree file. This means ASTRAL-Pro sees multi-labeled trees (paralogs appear as duplicate species names), which it handles natively — no mapping file needed. Trees with fewer than `--min-taxa` species (default 4) are filtered out. On Puhti, it loads `module load aster/1.23` and runs `astral-pro3`.
 
 Key options:
 - `--min-taxa` — Minimum number of species in a gene tree to include it (default: 4)
@@ -368,8 +368,7 @@ Key options:
 - `--extra-args` — Additional arguments passed to ASTRAL-Pro
 
 Output in `runs/<run_id>/`:
-- `slurm/gene_trees.nwk` — Concatenated gene trees (one per line)
-- `slurm/species_map.txt` — Species-to-gene mapping
+- `slurm/gene_trees.nwk` — Concatenated gene trees with tips renamed to species
 - `slurm/astral.sbatch` — SLURM script
 - `species_tree.nwk` — Output species tree (after job completes)
 
