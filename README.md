@@ -332,6 +332,51 @@ Output per OG in `runs/<run_id>/gene_trees/<OG_ID>/`:
 
 ---
 
+## Species Tree with ASTRAL-Pro (`astral-slurm`)
+
+After gene trees are computed, infer a species tree using ASTRAL-Pro. This command collects gene trees from a `phylo-slurm` run, builds a species mapping from tip labels, filters by minimum species count, and generates a SLURM script.
+
+```bash
+# Generate ASTRAL-Pro script (auto-detect latest phylo run)
+fungalphylo astral-slurm --account project_123 /path/to/project
+
+# From a specific phylo run
+fungalphylo astral-slurm \
+  --account project_123 \
+  --run-id <phylo_run_id> \
+  --output-run-id astral_run1 \
+  /path/to/project
+
+# Generate + submit
+fungalphylo astral-slurm \
+  --account project_123 --submit /path/to/project
+
+# Custom parameters
+fungalphylo astral-slurm \
+  --account project_123 \
+  --min-taxa 10 --delimiter "|" \
+  --time 08:00:00 --mem 32G \
+  /path/to/project
+```
+
+**How it works**: Tip labels in gene trees use the format `species|protein_id`. The command splits on the delimiter (`|` by default) to extract species names, builds a mapping file (`species: gene1, gene2, ...`), and filters out trees with fewer than `--min-taxa` species (default 4). On Puhti, it loads `module load aster/1.23` and runs `astral-pro3`.
+
+Key options:
+- `--min-taxa` — Minimum number of species in a gene tree to include it (default: 4)
+- `--delimiter` — Character separating species from gene ID in tip labels (default: `|`)
+- `--astral-cmd` — ASTRAL executable (default: `astral-pro3`)
+- `--extra-args` — Additional arguments passed to ASTRAL-Pro
+
+Output in `runs/<run_id>/`:
+- `slurm/gene_trees.nwk` — Concatenated gene trees (one per line)
+- `slurm/species_map.txt` — Species-to-gene mapping
+- `slurm/astral.sbatch` — SLURM script
+- `species_tree.nwk` — Output species tree (after job completes)
+
+SLURM defaults: 4h, 4 CPUs, 16G memory, `small` partition.
+
+---
+
 ## Compute: Gene Family Phylogenomics (`protsetphylo`)
 
 Analyze specific gene families (e.g., MFS sugar transporters) across your staged proteomes.
