@@ -470,11 +470,15 @@ def test_taxonomy_export_family_creates_template(tmp_path: Path) -> None:
     template = paths.family_config_dir("mfs_sugar") / "taxonomy_template.tsv"
     assert template.exists()
     text = template.read_text(encoding="utf-8")
-    assert "short_name\tspecies\tportal_id\tncbi_taxon_id" in text
-    assert "phylum" in text
+    assert "short_name\tspecies\tportal_id\tncbi_taxon_id\tnote" in text
+    # No rank columns in export — those are resolved by apply
+    assert "phylum" not in text
     assert "PortalA" in text
     assert "PortalB" in text
     assert "OutgroupX" in text
+    # Portal species have ncbi_taxon_id pre-filled
+    assert "1234" in text
+    assert "5678" in text
 
 
 def test_taxonomy_export_family_custom_output(tmp_path: Path) -> None:
@@ -508,16 +512,34 @@ def test_taxonomy_export_family_no_characterized_errors(tmp_path: Path) -> None:
     assert "Characterized TSV not found" in result.output
 
 
-def test_taxonomy_apply_family_stores_tsv(tmp_path: Path) -> None:
+def test_taxonomy_apply_family_resolves_lineages(tmp_path: Path) -> None:
     project_dir = tmp_path / "project"
     paths = _init_project(project_dir)
 
-    # Create a filled-in taxonomy TSV
+    # Seed taxdump so lineages can be resolved
+    taxdump_dir = project_dir / "cache" / "ncbi_taxonomy" / "new_taxdump"
+    taxdump_dir.mkdir(parents=True, exist_ok=True)
+    (taxdump_dir / "names.dmp").write_text(
+        "1\t|\troot\t|\t\t|\tscientific name\t|\n"
+        "100\t|\tAscomycota\t|\t\t|\tscientific name\t|\n"
+        "200\t|\tEurotiomycetes\t|\t\t|\tscientific name\t|\n"
+        "1234\t|\tAspergillus fumigatus\t|\t\t|\tscientific name\t|\n",
+        encoding="utf-8",
+    )
+    (taxdump_dir / "nodes.dmp").write_text(
+        "1\t|\t1\t|\tno rank\t|\n"
+        "100\t|\t1\t|\tphylum\t|\n"
+        "200\t|\t100\t|\tclass\t|\n"
+        "1234\t|\t200\t|\tspecies\t|\n",
+        encoding="utf-8",
+    )
+
+    # User-edited TSV with ncbi_taxon_id filled in
     tsv = tmp_path / "taxonomy_filled.tsv"
     tsv.write_text(
-        "short_name\tspecies\tportal_id\tncbi_taxon_id\tphylum\tclass\torder\tfamily\tgenus\tspecies\n"
-        "PortalA\tAsp fum\tPortalA\t1234\tAscomycota\tEurotiomycetes\tEurotiales\tAspergillaceae\tAspergillus\tAspergillus fumigatus\n"
-        "OutgroupX\tOutgroup sp\t\t\tBasidiomycota\t\t\t\t\tOutgroup sp\n",
+        "short_name\tspecies\tportal_id\tncbi_taxon_id\tnote\n"
+        "PortalA\tAsp fum\tPortalA\t1234\t\n"
+        "OutgroupX\tOutgroup sp\t\t\tno taxon known\n",
         encoding="utf-8",
     )
 
@@ -527,13 +549,18 @@ def test_taxonomy_apply_family_stores_tsv(tmp_path: Path) -> None:
     )
     assert result.exit_code == 0, result.output
     assert "Applied family taxonomy" in result.output
-    assert "Species:  2" in result.output
+    assert "Species:   2" in result.output
+    assert "Resolved:  1" in result.output
 
     dest = paths.family_config_dir("mfs_sugar") / "taxonomy.tsv"
     assert dest.exists()
     text = dest.read_text(encoding="utf-8")
-    assert "PortalA" in text
+    # Output should have rank columns resolved from taxdump
+    assert "phylum" in text
     assert "Ascomycota" in text
+    assert "Eurotiomycetes" in text
+    assert "PortalA" in text
+    assert "OutgroupX" in text
 
 
 def test_taxonomy_apply_family_dry_run(tmp_path: Path) -> None:
@@ -542,8 +569,8 @@ def test_taxonomy_apply_family_dry_run(tmp_path: Path) -> None:
 
     tsv = tmp_path / "taxonomy_filled.tsv"
     tsv.write_text(
-        "short_name\tspecies\tphylum\n"
-        "PortalA\tAsp fum\tAscomycota\n",
+        "short_name\tncbi_taxon_id\n"
+        "PortalA\t1234\n",
         encoding="utf-8",
     )
 
@@ -563,9 +590,9 @@ def test_taxonomy_apply_family_missing_columns_errors(tmp_path: Path) -> None:
     project_dir = tmp_path / "project"
     _init_project(project_dir)
 
-    # Missing short_name column
+    # Missing ncbi_taxon_id column
     tsv = tmp_path / "bad.tsv"
-    tsv.write_text("species\tphylum\nAsp fum\tAscomycota\n", encoding="utf-8")
+    tsv.write_text("short_name\tspecies\nPortalA\tAsp fum\n", encoding="utf-8")
 
     result = runner.invoke(
         app,
@@ -573,6 +600,52 @@ def test_taxonomy_apply_family_missing_columns_errors(tmp_path: Path) -> None:
     )
     assert result.exit_code != 0
     assert "Missing required columns" in result.output
+
+
+def test_taxonomy_apply_family_invalid_taxon_id_errors(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    _init_project(project_dir)
+
+    tsv = tmp_path / "bad_taxon.tsv"
+    tsv.write_text(
+        "short_name\tncbi_taxon_id\n"
+        "PortalA\tnot_a_number\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        ["taxonomy", "apply", "--family-id", "mfs_sugar", str(project_dir), str(tsv)],
+    )
+    assert result.exit_code != 0
+    assert "Invalid ncbi_taxon_id" in result.output
+
+
+def test_taxonomy_apply_family_without_taxdump(tmp_path: Path) -> None:
+    """Apply works without taxdump — rank columns are empty."""
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+
+    tsv = tmp_path / "taxonomy_filled.tsv"
+    tsv.write_text(
+        "short_name\tspecies\tportal_id\tncbi_taxon_id\n"
+        "PortalA\tAsp fum\tPortalA\t1234\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        ["taxonomy", "apply", "--family-id", "mfs_sugar", str(project_dir), str(tsv)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "WARNING: taxdump not found" in result.output
+
+    dest = paths.family_config_dir("mfs_sugar") / "taxonomy.tsv"
+    assert dest.exists()
+    text = dest.read_text(encoding="utf-8")
+    # Header has rank columns even though they're empty
+    assert "phylum" in text
+    assert "PortalA" in text
 
 
 

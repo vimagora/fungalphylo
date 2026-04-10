@@ -576,16 +576,16 @@ Output per OG in `runs/<run_id>/gene_trees/<OG_ID>/`.
 
 #### 9. Taxonomy for gene families
 
-Export a taxonomy template for portal + standalone species, fill in ranks, and apply:
+Export a taxonomy template for portal + standalone species, fill in `ncbi_taxon_id`, and apply to resolve full lineages:
 
 ```bash
-# Export template (portal species pre-filled from DB/taxdump, standalone empty)
+# Export template (portal species get ncbi_taxon_id pre-filled from DB)
 fungalphylo taxonomy export --family-id mfs_sugar /path/to/project
 
 # Edit families/mfs_sugar/config/taxonomy_template.tsv:
-#   Fill in phylum, class, order, family, genus, species for standalone rows
+#   Fill in ncbi_taxon_id for standalone species (portals are already filled)
 
-# Apply the filled-in taxonomy
+# Apply — resolves full lineages (phylum→species) from NCBI taxdump
 fungalphylo taxonomy apply --family-id mfs_sugar /path/to/project \
   families/mfs_sugar/config/taxonomy_template.tsv
 
@@ -594,7 +594,7 @@ fungalphylo taxonomy apply --family-id mfs_sugar --dry-run /path/to/project \
   families/mfs_sugar/config/taxonomy_template.tsv
 ```
 
-The applied taxonomy is stored at `families/<family_id>/config/taxonomy.tsv` and used by `tree-export` for color bars.
+The apply step reads `ncbi_taxon_id` values, resolves lineages from the NCBI taxdump (run `taxonomy fetch-ncbi` first), and writes `families/<family_id>/config/taxonomy.tsv` with rank columns. This file is used by `tree-export` for color bars.
 
 #### 10. Visualize gene trees with `tree-export`
 

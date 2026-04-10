@@ -664,8 +664,11 @@ def _export_family_taxonomy(
 ) -> None:
     """Export a taxonomy template for a gene family's species.
 
-    Portal species get pre-filled ncbi_taxon_id from the DB.
-    Standalone species get empty rows for the user to fill in.
+    Mirrors the species-dataset export: outputs short_name, species,
+    portal_id, ncbi_taxon_id, note.  Portal species get ncbi_taxon_id
+    pre-filled from the DB; standalone species get an empty cell for
+    the user to fill in.  The taxdump lineage resolution happens later
+    in ``apply --family-id``.
     """
     char_tsv = paths.family_characterized_dir(family_id) / "characterized.tsv"
     if not char_tsv.exists():
@@ -695,7 +698,7 @@ def _export_family_taxonomy(
             if pid not in portal_species:
                 portal_species[pid] = ""
 
-    # Fetch ncbi_taxon_id for portal species
+    # Fetch ncbi_taxon_id for portal species from DB
     conn = connect(paths.db_path)
     try:
         portal_tax: dict[str, int | None] = {}
@@ -710,20 +713,6 @@ def _export_family_taxonomy(
     finally:
         conn.close()
 
-    # Resolve taxonomy from taxdump for portal species that have taxon IDs
-    taxdump_dir = paths.cache_dir / "ncbi_taxonomy" / "new_taxdump"
-    names_path = taxdump_dir / "names.dmp"
-    nodes_path = taxdump_dir / "nodes.dmp"
-    have_taxdump = names_path.exists() and nodes_path.exists()
-
-    portal_lineages: dict[str, dict[str, str]] = {}
-    if have_taxdump:
-        names = _load_taxdump_names(names_path)
-        nodes = _load_taxdump_nodes(nodes_path)
-        for pid, tax_id in portal_tax.items():
-            if tax_id:
-                portal_lineages[pid] = _lineage_for_taxid(tax_id, nodes, names)
-
     # Output path
     if out is None:
         config_dir = paths.family_config_dir(family_id)
@@ -733,26 +722,26 @@ def _export_family_taxonomy(
         out = out.expanduser().resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    # Write template
-    header = ["short_name", "species", "portal_id", "ncbi_taxon_id"] + TAXONOMY_RANKS
+    # Write template — same shape as species-dataset export
+    header = ["short_name", "species", "portal_id", "ncbi_taxon_id", "note"]
     with out.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f, delimiter="\t")
         w.writerow(header)
 
-        # Portal species
+        # Portal species (ncbi_taxon_id pre-filled from DB)
         for pid in sorted(portal_species):
             species = portal_species[pid]
             tax_id = portal_tax.get(pid)
-            lineage = portal_lineages.get(pid, {})
             w.writerow([
                 pid, species, pid,
                 "" if tax_id is None else str(tax_id),
-            ] + [lineage.get(rank, "") for rank in TAXONOMY_RANKS])
+                "",
+            ])
 
-        # Standalone species
+        # Standalone species (user fills in ncbi_taxon_id)
         for sn in sorted(standalone_species):
             species = standalone_species[sn]
-            w.writerow([sn, species, "", ""] + [""] * len(TAXONOMY_RANKS))
+            w.writerow([sn, species, "", "", ""])
 
     n_portal = len(portal_species)
     n_standalone = len(standalone_species)
@@ -768,10 +757,8 @@ def _export_family_taxonomy(
         },
     )
     typer.echo(f"Wrote family taxonomy template: {out}")
-    typer.echo(f"  Portal species:     {n_portal} (pre-filled from DB)")
-    typer.echo(f"  Standalone species:  {n_standalone} (fill in taxonomy ranks)")
-    if not have_taxdump:
-        typer.echo("  NOTE: NCBI taxdump not found — run `taxonomy fetch-ncbi` to auto-fill portal lineages.")
+    typer.echo(f"  Portal species:     {n_portal} (ncbi_taxon_id pre-filled from DB)")
+    typer.echo(f"  Standalone species:  {n_standalone} (fill in ncbi_taxon_id)")
 
 
 @app.command("apply")
@@ -885,63 +872,115 @@ def _apply_family_taxonomy(
     taxonomy_tsv: Path,
     dry_run: bool,
 ) -> None:
-    """Validate and store a filled-in taxonomy template for a gene family.
+    """Validate user-edited taxonomy TSV, resolve lineages from taxdump, and write result.
 
-    Reads the user-edited TSV (from `taxonomy export --family-id`), validates
-    that required columns and taxonomy ranks are present, and copies it to
-    families/<family_id>/config/taxonomy.tsv as the canonical source.
+    Mirrors the species-dataset apply flow: the user provides ncbi_taxon_id
+    values (from ``taxonomy export --family-id``).  This function validates
+    them, resolves full lineages from the NCBI taxdump, and writes the
+    complete taxonomy (with rank columns) to
+    ``families/<family_id>/config/taxonomy.tsv``.
     """
     taxonomy_tsv = taxonomy_tsv.expanduser().resolve()
     if not taxonomy_tsv.exists():
         raise typer.BadParameter(f"Taxonomy TSV not found: {taxonomy_tsv}")
 
-    # Validate structure
+    # Read and validate structure
     with taxonomy_tsv.open(encoding="utf-8") as fh:
         reader = csv.DictReader(fh, delimiter="\t")
         if reader.fieldnames is None:
             raise typer.BadParameter(f"Taxonomy TSV is empty: {taxonomy_tsv}")
 
         fieldnames = set(reader.fieldnames)
-        required = {"short_name", "species"}
+        required = {"short_name", "ncbi_taxon_id"}
         missing = required - fieldnames
         if missing:
             raise typer.BadParameter(
                 f"Missing required columns: {', '.join(sorted(missing))}. "
                 f"Found: {', '.join(sorted(fieldnames))}"
             )
-
-        # Check which taxonomy ranks are present
-        present_ranks = [r for r in TAXONOMY_RANKS if r in fieldnames]
-        if not present_ranks:
-            raise typer.BadParameter(
-                f"No taxonomy rank columns found. Expected at least one of: "
-                f"{', '.join(TAXONOMY_RANKS)}"
-            )
-
         rows = list(reader)
 
     if not rows:
         raise typer.BadParameter(f"Taxonomy TSV has no data rows: {taxonomy_tsv}")
 
-    # Count filled entries
+    # Validate ncbi_taxon_id values
     n_total = len(rows)
-    n_with_taxonomy = sum(
-        1 for row in rows
-        if any(row.get(rank, "").strip() for rank in present_ranks)
-    )
+    n_with_taxon = 0
+    invalid: list[str] = []
+    for row in rows:
+        raw = (row.get("ncbi_taxon_id") or "").strip()
+        if not raw:
+            continue
+        try:
+            val = int(raw)
+            if val <= 0:
+                raise ValueError("non-positive")
+            n_with_taxon += 1
+        except ValueError:
+            sn = row.get("short_name", "?")
+            invalid.append(f"{sn}: {raw!r}")
+
+    if invalid:
+        raise typer.BadParameter(
+            f"Invalid ncbi_taxon_id values:\n  " + "\n  ".join(invalid)
+        )
+
+    # Load taxdump
+    taxdump_dir = paths.cache_dir / "ncbi_taxonomy" / "new_taxdump"
+    names_path = taxdump_dir / "names.dmp"
+    nodes_path = taxdump_dir / "nodes.dmp"
+    have_taxdump = names_path.exists() and nodes_path.exists()
+
+    names: dict[int, str] = {}
+    nodes: dict[int, tuple[int, str]] = {}
+    if have_taxdump:
+        names = _load_taxdump_names(names_path)
+        nodes = _load_taxdump_nodes(nodes_path)
+
+    # Resolve lineages
+    resolved_rows: list[dict[str, str]] = []
+    n_resolved = 0
+    for row in rows:
+        sn = (row.get("short_name") or "").strip()
+        species = (row.get("species") or "").strip()
+        portal_id = (row.get("portal_id") or "").strip()
+        raw_taxon = (row.get("ncbi_taxon_id") or "").strip()
+        note = (row.get("note") or "").strip()
+
+        lineage: dict[str, str] = {rank: "" for rank in TAXONOMY_RANKS}
+        if raw_taxon and have_taxdump:
+            tax_id = int(raw_taxon)
+            lineage = _lineage_for_taxid(tax_id, nodes, names)
+            n_resolved += 1
+
+        resolved_rows.append({
+            "short_name": sn,
+            "species": species or lineage.get("species", ""),
+            "portal_id": portal_id,
+            "ncbi_taxon_id": raw_taxon,
+            **lineage,
+        })
 
     if dry_run:
-        typer.echo(f"Dry run — would store {n_total} rows ({n_with_taxonomy} with taxonomy)")
-        typer.echo(f"  Ranks present: {', '.join(present_ranks)}")
+        typer.echo(f"Dry run — {n_total} species, {n_with_taxon} with ncbi_taxon_id")
+        if have_taxdump:
+            typer.echo(f"  Would resolve {n_resolved} lineages from taxdump")
+        else:
+            typer.echo("  WARNING: taxdump not found — lineage columns will be empty")
+            typer.echo("  Run `taxonomy fetch-ncbi` first for full resolution")
         return
 
-    # Store as canonical taxonomy file
+    # Write resolved taxonomy
     config_dir = paths.family_config_dir(family_id)
     config_dir.mkdir(parents=True, exist_ok=True)
     dest = config_dir / "taxonomy.tsv"
 
-    import shutil
-    shutil.copy2(taxonomy_tsv, dest)
+    header = ["short_name", "species", "portal_id", "ncbi_taxon_id"] + TAXONOMY_RANKS
+    with dest.open("w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f, delimiter="\t")
+        w.writerow(header)
+        for r in resolved_rows:
+            w.writerow([r.get(col, "") for col in header])
 
     log_event(
         project_dir,
@@ -952,13 +991,18 @@ def _apply_family_taxonomy(
             "source": str(taxonomy_tsv),
             "dest": str(dest),
             "n_total": n_total,
-            "n_with_taxonomy": n_with_taxonomy,
-            "ranks": present_ranks,
+            "n_with_taxon": n_with_taxon,
+            "n_resolved": n_resolved,
+            "have_taxdump": have_taxdump,
         },
     )
     typer.echo(f"Applied family taxonomy: {dest}")
-    typer.echo(f"  Species:  {n_total} ({n_with_taxonomy} with taxonomy data)")
-    typer.echo(f"  Ranks:    {', '.join(present_ranks)}")
+    typer.echo(f"  Species:   {n_total} ({n_with_taxon} with ncbi_taxon_id)")
+    if have_taxdump:
+        typer.echo(f"  Resolved:  {n_resolved} lineages from taxdump")
+    else:
+        typer.echo("  WARNING: taxdump not found — lineage columns are empty")
+        typer.echo("  Run `taxonomy fetch-ncbi` then re-apply to fill ranks")
 
 
 @app.command("busco-mockup")
