@@ -94,7 +94,7 @@ def test_place_standalone_writes_script(tmp_path: Path, monkeypatch) -> None:
     })
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.protsetphylo.place_standalone.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
     )
 
@@ -144,7 +144,7 @@ def test_place_standalone_submit_mocked(tmp_path: Path, monkeypatch) -> None:
         return SimpleNamespace(stdout="Submitted batch job 77777\n")
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.protsetphylo.place_standalone.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         _fake_run,
     )
 

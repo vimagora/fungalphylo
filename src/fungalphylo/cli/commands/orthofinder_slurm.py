@@ -1,27 +1,25 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
 import typer
 
 from fungalphylo.core.events import log_event
-from fungalphylo.core.hash import hash_json
 from fungalphylo.core.ids import now_iso, now_tag
-from fungalphylo.core.manifest import write_manifest
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
-from fungalphylo.core.slurm import infer_account_from_project_dir, resolve_staging_id
+from fungalphylo.core.slurm import (
+    register_run,
+    resolve_account,
+    resolve_staging_id,
+    submit_sbatch,
+)
 from fungalphylo.core.tools import load_tools
-from fungalphylo.db.db import connect, init_db
+from fungalphylo.db.db import init_db
 
 app = typer.Typer(
     help="Generate (and optionally submit) a SLURM job for OrthoFinder."
 )
-
-
-def _ensure_dir(p: Path) -> None:
-    p.mkdir(parents=True, exist_ok=True)
 
 
 def _load_json(path: Path) -> dict:
@@ -117,31 +115,6 @@ echo "Threads:     $THREADS"
 echo "Done."
 """
 
-
-def _submit_script(script_path: Path, project_dir: Path, rid: str) -> None:
-    try:
-        res = subprocess.run(
-            ["sbatch", str(script_path)], check=True, capture_output=True, text=True
-        )
-        typer.echo(res.stdout.strip() or "Submitted.")
-        log_event(
-            project_dir,
-            {
-                "ts": now_iso(),
-                "event": "slurm_orthofinder_submit",
-                "run_id": rid,
-                "script_path": str(script_path),
-                "sbatch_stdout": res.stdout.strip(),
-            },
-        )
-    except FileNotFoundError:
-        raise RuntimeError(
-            "sbatch not found on PATH. Submit manually with: sbatch <script>"
-        ) from None
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(
-            f"sbatch failed: {e.stderr.strip() if e.stderr else str(e)}"
-        ) from e
 
 
 def _resolve_input_dir(
@@ -311,23 +284,7 @@ def orthofinder_slurm_command(
             paths=paths,
         )
 
-        inferred = infer_account_from_project_dir(project_dir)
-        acct = account or inferred
-        if not acct:
-            raise typer.BadParameter(
-                "Could not infer SLURM account from project_dir "
-                "(expected /scratch/<account>/...). Provide --account explicitly."
-            )
-
-        if not no_confirm and account is None:
-            ok = typer.confirm(
-                f"Detected SLURM account '{acct}' from project_dir. Use this account?",
-                default=True,
-            )
-            if not ok:
-                raise typer.BadParameter(
-                    "Account not confirmed. Re-run with --account <account> or --no-confirm."
-                )
+        acct = resolve_account(project_dir, account, no_confirm)
 
         of_cmd = tools.orthofinder.command
         selected_msa = msa_program or tools.orthofinder.msa_program
@@ -348,19 +305,14 @@ def orthofinder_slurm_command(
         mem_per_cpu = mem_per_cpu or default_mem
         partition = partition or "small"
 
-    if not acct:
-        raise typer.BadParameter(
-            "Could not determine SLURM account. Provide --account explicitly."
-        )
-
     run_root = paths.run_dir(rid)
     slurm_dir = run_root / "slurm"
     results_dir = run_root / "orthofinder_results"
     logs_dir = paths.logs_dir / "slurm"
 
-    _ensure_dir(slurm_dir)
+    slurm_dir.mkdir(parents=True, exist_ok=True)
     # Do NOT create results_dir here — OrthoFinder requires it to not exist
-    _ensure_dir(logs_dir)
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
     script_path = slurm_dir / "orthofinder.sbatch"
 
@@ -414,36 +366,13 @@ def orthofinder_slurm_command(
                 "submit": submit,
             },
         }
-        manifest_path = paths.run_manifest(rid)
-        write_manifest(manifest_path, manifest_data)
-        manifest_sha256 = hash_json(manifest_data)
-
-        # For family runs, use __family__ sentinel; for staging, use the staging_id
-        db_staging_id = source_id if source_kind == "staging" else "__family__"
-
-        conn = connect(paths.db_path)
-        try:
-            if db_staging_id == "__family__":
-                conn.execute(
-                    "INSERT OR IGNORE INTO stagings(staging_id, created_at, manifest_path, manifest_sha256) "
-                    "VALUES(?,?,?,?)",
-                    ("__family__", now_iso(), "__family__", "__family__"),
-                )
-            conn.execute(
-                "INSERT OR REPLACE INTO runs(run_id, staging_id, kind, created_at, manifest_path, manifest_sha256) "
-                "VALUES(?,?,?,?,?,?)",
-                (
-                    rid,
-                    db_staging_id,
-                    "orthofinder",
-                    manifest_data["created_at"],
-                    str(manifest_path.relative_to(project_dir)),
-                    manifest_sha256,
-                ),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        # staging_id is set for staging-sourced runs, None for family runs
+        db_staging_id = source_id if source_kind == "staging" else None
+        register_run(
+            paths, project_dir, rid, "orthofinder",
+            manifest_data["created_at"], manifest_data,
+            staging_id=db_staging_id,
+        )
 
     log_event(
         project_dir,
@@ -475,4 +404,15 @@ def orthofinder_slurm_command(
     typer.echo(f"Input dir ({n_faa} .faa files):  {resolved_input_dir}")
 
     if submit:
-        _submit_script(script_path, project_dir, rid)
+        stdout = submit_sbatch(script_path)
+        typer.echo(stdout or "Submitted.")
+        log_event(
+            project_dir,
+            {
+                "ts": now_iso(),
+                "event": "slurm_orthofinder_submit",
+                "run_id": rid,
+                "script_path": str(script_path),
+                "sbatch_stdout": stdout,
+            },
+        )

@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS stagings (
 -- Compute runs (orthofinder, interproscan, species_tree, family, etc.)
 CREATE TABLE IF NOT EXISTS runs (
   run_id          TEXT PRIMARY KEY,
-  staging_id      TEXT NOT NULL,
+  staging_id      TEXT,
   kind            TEXT NOT NULL,
   created_at      TEXT NOT NULL,
   manifest_path   TEXT NOT NULL,

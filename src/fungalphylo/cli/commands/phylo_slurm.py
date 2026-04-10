@@ -1,27 +1,20 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
 import typer
 
 from fungalphylo.core.events import log_event
-from fungalphylo.core.hash import hash_json
 from fungalphylo.core.ids import now_iso, now_tag
-from fungalphylo.core.manifest import write_manifest
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
-from fungalphylo.core.slurm import infer_account_from_project_dir
+from fungalphylo.core.slurm import register_run, resolve_account, submit_sbatch
 from fungalphylo.core.tools import bin_dir_export_lines, load_tools
-from fungalphylo.db.db import connect, init_db
+from fungalphylo.db.db import init_db
 
 app = typer.Typer(
     help="Generate a SLURM array job: MAFFT -> trimAl -> IQ-TREE per orthogroup."
 )
-
-
-def _ensure_dir(p: Path) -> None:
-    p.mkdir(parents=True, exist_ok=True)
 
 
 def _render_orchestrator(
@@ -281,21 +274,7 @@ def phylo_slurm_command(
     n_ogs = len(og_files)
 
     # Account
-    inferred = infer_account_from_project_dir(project_dir)
-    acct = account or inferred
-    if not acct:
-        raise typer.BadParameter(
-            "Could not infer SLURM account from project_dir. Provide --account explicitly."
-        )
-    if not no_confirm and account is None:
-        ok = typer.confirm(
-            f"Detected SLURM account '{acct}' from project_dir. Use this account?",
-            default=True,
-        )
-        if not ok:
-            raise typer.BadParameter(
-                "Account not confirmed. Re-run with --account <account> or --no-confirm."
-            )
+    acct = resolve_account(project_dir, account, no_confirm)
 
     # Defaults
     rid = output_run_id or f"phylo_{now_tag()}"
@@ -311,9 +290,9 @@ def phylo_slurm_command(
     output_root = run_root / "gene_trees"
     logs_dir = paths.logs_dir / "slurm"
 
-    _ensure_dir(slurm_dir)
-    _ensure_dir(output_root)
-    _ensure_dir(logs_dir)
+    slurm_dir.mkdir(parents=True, exist_ok=True)
+    output_root.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
     # Write file list (one OG FASTA path per line)
     filelist_path = slurm_dir / "og_filelist.txt"
@@ -365,11 +344,12 @@ def phylo_slurm_command(
     orchestrator_path.write_text(orchestrator_script, encoding="utf-8")
     orchestrator_path.chmod(0o755)
 
-    # Manifest
+    # Manifest + DB
+    created_at = now_iso()
     manifest_data = {
         "run_id": rid,
         "kind": "phylo",
-        "created_at": now_iso(),
+        "created_at": created_at,
         "source_run_id": source_run_id,
         "project_dir": str(project_dir),
         "paths": {
@@ -402,38 +382,12 @@ def phylo_slurm_command(
             "submit": submit,
         },
     }
-    manifest_path = paths.run_manifest(rid)
-    write_manifest(manifest_path, manifest_data)
-    manifest_sha256 = hash_json(manifest_data)
-
-    # DB row
-    conn = connect(paths.db_path)
-    try:
-        conn.execute(
-            "INSERT OR IGNORE INTO stagings(staging_id, created_at, manifest_path, manifest_sha256) "
-            "VALUES(?,?,?,?)",
-            ("__family__", now_iso(), "__family__", "__family__"),
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO runs(run_id, staging_id, kind, created_at, manifest_path, manifest_sha256) "
-            "VALUES(?,?,?,?,?,?)",
-            (
-                rid,
-                "__family__",
-                "phylo",
-                manifest_data["created_at"],
-                str(manifest_path.relative_to(project_dir)),
-                manifest_sha256,
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    register_run(paths, project_dir, rid, "phylo", created_at, manifest_data)
 
     log_event(
         project_dir,
         {
-            "ts": now_iso(),
+            "ts": created_at,
             "event": "slurm_phylo_write",
             "run_id": rid,
             "source_run_id": source_run_id,
@@ -457,26 +411,15 @@ def phylo_slurm_command(
     typer.echo("Rerun the orchestrator after completion to process remaining OGs.")
 
     if submit:
-        try:
-            res = subprocess.run(
-                ["bash", str(orchestrator_path)], check=True, capture_output=True, text=True
-            )
-            typer.echo(res.stdout.strip() or "Submitted.")
-            log_event(
-                project_dir,
-                {
-                    "ts": now_iso(),
-                    "event": "slurm_phylo_submit",
-                    "run_id": rid,
-                    "orchestrator": str(orchestrator_path),
-                    "sbatch_stdout": res.stdout.strip(),
-                },
-            )
-        except FileNotFoundError:
-            raise RuntimeError(
-                "bash not found on PATH."
-            ) from None
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(
-                f"Orchestrator failed: {e.stderr.strip() if e.stderr else str(e)}"
-            ) from e
+        stdout = submit_sbatch(orchestrator_path, use_bash=True)
+        typer.echo(stdout or "Submitted.")
+        log_event(
+            project_dir,
+            {
+                "ts": now_iso(),
+                "event": "slurm_phylo_submit",
+                "run_id": rid,
+                "orchestrator": str(orchestrator_path),
+                "sbatch_stdout": stdout,
+            },
+        )

@@ -428,6 +428,154 @@ def test_taxonomy_apply_rejects_unknown_or_invalid_values(tmp_path: Path) -> Non
     assert "Unknown portal_id" in result.output
 
 
+def _seed_family_characterized(paths: ProjectPaths, family_id: str, rows: list[dict]) -> Path:
+    """Create a characterized.tsv for a gene family."""
+    char_dir = paths.family_characterized_dir(family_id)
+    char_dir.mkdir(parents=True, exist_ok=True)
+    tsv_path = char_dir / "characterized.tsv"
+    if not rows:
+        tsv_path.write_text("short_name\tspecies\tportal_id\n", encoding="utf-8")
+        return tsv_path
+    header = list(rows[0].keys())
+    lines = ["\t".join(header)]
+    for r in rows:
+        lines.append("\t".join(str(r.get(h, "")) for h in header))
+    tsv_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return tsv_path
+
+
+# --- Family taxonomy tests ---
+
+
+def test_taxonomy_export_family_creates_template(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+    _insert_portal(paths, "PortalA", 1234)
+    _insert_portal(paths, "PortalB", 5678)
+
+    _seed_family_characterized(paths, "mfs_sugar", [
+        {"short_name": "PortalA", "species": "Aspergillus fumigatus", "portal_id": "PortalA"},
+        {"short_name": "PortalB", "species": "Aspergillus niger", "portal_id": "PortalB"},
+        {"short_name": "OutgroupX", "species": "Outgroup species", "portal_id": ""},
+    ])
+
+    result = runner.invoke(
+        app,
+        ["taxonomy", "export", "--family-id", "mfs_sugar", str(project_dir)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Portal species:     2" in result.output
+    assert "Standalone species:  1" in result.output
+
+    template = paths.family_config_dir("mfs_sugar") / "taxonomy_template.tsv"
+    assert template.exists()
+    text = template.read_text(encoding="utf-8")
+    assert "short_name\tspecies\tportal_id\tncbi_taxon_id" in text
+    assert "phylum" in text
+    assert "PortalA" in text
+    assert "PortalB" in text
+    assert "OutgroupX" in text
+
+
+def test_taxonomy_export_family_custom_output(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+    _insert_portal(paths, "PortalA", 1234)
+
+    _seed_family_characterized(paths, "mfs_sugar", [
+        {"short_name": "PortalA", "species": "Asp fum", "portal_id": "PortalA"},
+    ])
+
+    out = project_dir / "custom_out.tsv"
+    result = runner.invoke(
+        app,
+        ["taxonomy", "export", "--family-id", "mfs_sugar", "--out", str(out), str(project_dir)],
+    )
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    assert "PortalA" in out.read_text(encoding="utf-8")
+
+
+def test_taxonomy_export_family_no_characterized_errors(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    _init_project(project_dir)
+
+    result = runner.invoke(
+        app,
+        ["taxonomy", "export", "--family-id", "nonexistent", str(project_dir)],
+    )
+    assert result.exit_code != 0
+    assert "Characterized TSV not found" in result.output
+
+
+def test_taxonomy_apply_family_stores_tsv(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+
+    # Create a filled-in taxonomy TSV
+    tsv = tmp_path / "taxonomy_filled.tsv"
+    tsv.write_text(
+        "short_name\tspecies\tportal_id\tncbi_taxon_id\tphylum\tclass\torder\tfamily\tgenus\tspecies\n"
+        "PortalA\tAsp fum\tPortalA\t1234\tAscomycota\tEurotiomycetes\tEurotiales\tAspergillaceae\tAspergillus\tAspergillus fumigatus\n"
+        "OutgroupX\tOutgroup sp\t\t\tBasidiomycota\t\t\t\t\tOutgroup sp\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        ["taxonomy", "apply", "--family-id", "mfs_sugar", str(project_dir), str(tsv)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Applied family taxonomy" in result.output
+    assert "Species:  2" in result.output
+
+    dest = paths.family_config_dir("mfs_sugar") / "taxonomy.tsv"
+    assert dest.exists()
+    text = dest.read_text(encoding="utf-8")
+    assert "PortalA" in text
+    assert "Ascomycota" in text
+
+
+def test_taxonomy_apply_family_dry_run(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+
+    tsv = tmp_path / "taxonomy_filled.tsv"
+    tsv.write_text(
+        "short_name\tspecies\tphylum\n"
+        "PortalA\tAsp fum\tAscomycota\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        ["taxonomy", "apply", "--family-id", "mfs_sugar", "--dry-run", str(project_dir), str(tsv)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Dry run" in result.output
+
+    # Should NOT create the file
+    dest = paths.family_config_dir("mfs_sugar") / "taxonomy.tsv"
+    assert not dest.exists()
+
+
+def test_taxonomy_apply_family_missing_columns_errors(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    _init_project(project_dir)
+
+    # Missing short_name column
+    tsv = tmp_path / "bad.tsv"
+    tsv.write_text("species\tphylum\nAsp fum\tAscomycota\n", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        ["taxonomy", "apply", "--family-id", "mfs_sugar", str(project_dir), str(tsv)],
+    )
+    assert result.exit_code != 0
+    assert "Missing required columns" in result.output
+
+
+
 def test_init_db_migrates_existing_portals_table_with_ncbi_taxon_id(tmp_path: Path) -> None:
     db_path = tmp_path / "legacy.sqlite"
     conn = sqlite3.connect(db_path)

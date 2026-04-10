@@ -2,20 +2,16 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from pathlib import Path
 
 import dendropy
 import typer
 
 from fungalphylo.core.events import log_event
-from fungalphylo.core.hash import hash_json
 from fungalphylo.core.ids import now_iso, now_tag
-from fungalphylo.core.manifest import write_manifest
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
-from fungalphylo.core.slurm import infer_account_from_project_dir
-from fungalphylo.core.tools import load_tools
-from fungalphylo.db.db import connect, init_db
+from fungalphylo.core.slurm import register_run, resolve_account, submit_sbatch
+from fungalphylo.db.db import init_db
 
 app = typer.Typer(
     help="Collect gene trees, rename tips to species, and generate ASTRAL-Pro SLURM script."
@@ -170,19 +166,7 @@ def astral_slurm_command(
         raise typer.BadParameter(f"No .treefile files found in {gene_trees_dir}")
 
     # Account
-    inferred = infer_account_from_project_dir(project_dir)
-    acct = account or inferred
-    if not acct:
-        raise typer.BadParameter(
-            "Could not infer SLURM account. Provide --account explicitly."
-        )
-    if not no_confirm and account is None:
-        ok = typer.confirm(
-            f"Detected SLURM account '{acct}' from project_dir. Use this account?",
-            default=True,
-        )
-        if not ok:
-            raise typer.BadParameter("Account not confirmed.")
+    acct = resolve_account(project_dir, account, no_confirm)
 
     # Set up run directory
     rid = output_run_id or f"astral_{now_tag()}"
@@ -282,33 +266,7 @@ def astral_slurm_command(
             "submit": submit,
         },
     }
-    manifest_path = paths.run_manifest(rid)
-    write_manifest(manifest_path, manifest_data)
-    manifest_sha256 = hash_json(manifest_data)
-
-    # DB row
-    conn = connect(paths.db_path)
-    try:
-        conn.execute(
-            "INSERT OR IGNORE INTO stagings(staging_id, created_at, manifest_path, manifest_sha256) "
-            "VALUES(?,?,?,?)",
-            ("__family__", created_at, "__family__", "__family__"),
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO runs(run_id, staging_id, kind, created_at, manifest_path, manifest_sha256) "
-            "VALUES(?,?,?,?,?,?)",
-            (
-                rid,
-                "__family__",
-                "astral",
-                created_at,
-                str(manifest_path.relative_to(project_dir)),
-                manifest_sha256,
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    register_run(paths, project_dir, rid, "astral", created_at, manifest_data)
 
     log_event(
         project_dir,
@@ -334,26 +292,15 @@ def astral_slurm_command(
     typer.echo(f"  Tips renamed to species (no mapping file needed)")
 
     if submit:
-        try:
-            res = subprocess.run(
-                ["sbatch", str(script_path)], check=True, capture_output=True, text=True
-            )
-            typer.echo(res.stdout.strip() or "Submitted.")
-            log_event(
-                project_dir,
-                {
-                    "ts": now_iso(),
-                    "event": "astral_submit",
-                    "run_id": rid,
-                    "script": str(script_path),
-                    "sbatch_stdout": res.stdout.strip(),
-                },
-            )
-        except FileNotFoundError:
-            raise RuntimeError(
-                "sbatch not found on PATH. Submit manually with: sbatch <script>"
-            ) from None
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(
-                f"sbatch failed: {e.stderr.strip() if e.stderr else str(e)}"
-            ) from e
+        stdout = submit_sbatch(script_path)
+        typer.echo(stdout or "Submitted.")
+        log_event(
+            project_dir,
+            {
+                "ts": now_iso(),
+                "event": "astral_submit",
+                "run_id": rid,
+                "script": str(script_path),
+                "sbatch_stdout": stdout,
+            },
+        )

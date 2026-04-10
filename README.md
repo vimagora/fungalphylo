@@ -43,7 +43,7 @@ interproscan-slurm     # Domain annotation
 orthofinder-slurm      # Orthogroup inference
 filter-orthogroups     # Select single-copy orthogroups
 phylo-slurm            # Parallel gene tree inference (MAFFT → trimAl → IQ-TREE)
-protsetphylo           # Gene family phylogenomics
+protsetphylo           # Gene family phylogenomics + visualization
 ```
 
 ---
@@ -383,13 +383,10 @@ Analyze specific gene families (e.g., MFS sugar transporters) across your staged
 ### Pipeline
 
 ```
-protsetphylo init → interproscan → select → orthofinder-slurm → [place-standalone] → og-report → og-apply → protsetphylo phylo-slurm
-                                      ↓
-                              (optional quick path)
-                          build-fasta → MMseqs2/CD-HIT → align → tree
+init → interproscan → select → orthofinder-slurm → [place-standalone] → og-report → og-apply → phylo-slurm → [taxonomy] → tree-export → clade-mark
 ```
 
-The recommended path uses OrthoFinder on the per-species FASTAs from `select`. If standalone characterized genes exist (no `portal_id`), `place-standalone` uses HMM profiles to assign them to OGs before reporting. Then `og-report` inspects orthogroups containing characterized genes, `og-apply` selects/merges OGs, and `protsetphylo phylo-slurm` runs chained SLURM array jobs (MAFFT --auto → trimAl → IQ-TREE) with per-step resource allocation. The optional quick path uses `build-fasta` with clustering for fast exploratory analysis.
+OrthoFinder clusters per-species FASTAs from `select` into orthogroups. If standalone characterized genes exist (no `portal_id`), `place-standalone` uses HMM profiles to assign them to OGs. Then `og-report` inspects which OGs contain characterized genes, `og-apply` selects/merges OGs, and `protsetphylo phylo-slurm` runs chained SLURM array jobs (MAFFT --auto → trimAl → IQ-TREE) per OG.
 
 ### Step-by-step
 
@@ -577,68 +574,93 @@ Key differences from species tree `phylo-slurm`:
 
 Output per OG in `runs/<run_id>/gene_trees/<OG_ID>/`.
 
-#### Optional: Quick clustering with `build-fasta`
+#### 9. Taxonomy for gene families
 
-For fast exploratory analysis without OrthoFinder:
+Export a taxonomy template for portal + standalone species, fill in ranks, and apply:
 
 ```bash
-# Merge all selected into one FASTA (no clustering)
-fungalphylo protsetphylo build-fasta \
+# Export template (portal species pre-filled from DB/taxdump, standalone empty)
+fungalphylo taxonomy export --family-id mfs_sugar /path/to/project
+
+# Edit families/mfs_sugar/config/taxonomy_template.tsv:
+#   Fill in phylum, class, order, family, genus, species for standalone rows
+
+# Apply the filled-in taxonomy
+fungalphylo taxonomy apply --family-id mfs_sugar /path/to/project \
+  families/mfs_sugar/config/taxonomy_template.tsv
+
+# Dry run to validate first
+fungalphylo taxonomy apply --family-id mfs_sugar --dry-run /path/to/project \
+  families/mfs_sugar/config/taxonomy_template.tsv
+```
+
+The applied taxonomy is stored at `families/<family_id>/config/taxonomy.tsv` and used by `tree-export` for color bars.
+
+#### 10. Visualize gene trees with `tree-export`
+
+Render gene trees as annotated PDF/SVG with node numbers, taxonomy color bars, group annotations, and characterized-gene landmarks:
+
+```bash
+# Basic export (auto-detect latest phylo run)
+fungalphylo protsetphylo tree-export \
   --family-id mfs_sugar /path/to/project
 
-# Or with MMseqs2/CD-HIT clustering for subfamily splitting
-module load mmseqs2
-fungalphylo protsetphylo build-fasta \
+# With taxonomy color bars (repeatable --tax-level)
+fungalphylo protsetphylo tree-export \
   --family-id mfs_sugar \
-  --redundancy-tool mmseqs2 \
-  --identity-threshold 0.3 \
+  --tax-level order --tax-level family \
+  /path/to/project
+
+# From a specific phylo run
+fungalphylo protsetphylo tree-export \
+  --family-id mfs_sugar --run-id <phylo_run_id> \
   /path/to/project
 ```
 
-When using a redundancy tool, outputs include:
-- `fasta/combined.faa` — representative sequences
-- `fasta/combined.pre_dedup.faa` — all sequences before clustering
-- `fasta/cluster_members.tsv` — cluster membership (representative → member)
-- `fasta/clusters/` — per-cluster FASTAs
-- `fasta/clusters/cluster_summary.tsv` — cluster sizes with `has_characterized` flag
+**What it does**:
+- Numbers internal nodes: IQ-TREE output `95/88` (UFBoot/SH-aLRT) becomes `95/88/N4` (appends node index)
+- Renders each OG tree as PDF + SVG with toytree/toyplot
+- Taxonomy color bars: one bar per `--tax-level` (e.g., order, family)
+- `group_*` columns from characterized.tsv: single-value → color bars, multi-value (semicolons) → heatmaps
+- Characterized gene tips highlighted in red
+- Writes numbered Newick files for downstream `clade-mark`
 
-#### 5. Align
+Output in `families/<family_id>/tree_export/`:
+- `trees/<OG_ID>.pdf` / `trees/svg/<OG_ID>.svg` — Rendered trees
+- `numbered_newick/<OG_ID>.nwk` — Trees with node numbers in internal labels
 
-```bash
-fungalphylo protsetphylo align \
-  --family-id mfs_sugar \
-  --submit /path/to/project
-```
+#### 11. Mark clades with `clade-mark`
 
-Generates a SLURM script that runs MAFFT then trimAl. Configurable parameters:
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--mafft-retree` | 2 | Guide tree rebuilds |
-| `--mafft-maxiterate` | 2 | Iterative refinement cycles (use 1000 for small sets) |
-| `--trimal-gt` | 0.8 | Gap threshold (fraction of sequences required) |
-| `--trimal-cons` | 10.0 | Minimum conservation percentage |
-| `--input-fasta` | | Override input (e.g., a cluster FASTA) |
-
-Outputs in `families/<family_id>/alignment/`.
-
-#### 6. Build phylogenetic tree
+After reviewing the numbered trees, identify clades of interest and build a species × clade gene count matrix:
 
 ```bash
-# IQ-TREE (refined, slower)
-fungalphylo protsetphylo tree \
-  --family-id mfs_sugar \
-  --tree-method iqtree \
-  --submit /path/to/project
+# Create a TSV with columns: clade_name, og_id, node_number
+# (node_number from the numbered newick / rendered tree)
 
-# FastTree (exploratory, fast)
-fungalphylo protsetphylo tree \
+fungalphylo protsetphylo clade-mark \
   --family-id mfs_sugar \
-  --tree-method fasttree \
-  --submit /path/to/project
+  --clade-tsv clades.tsv \
+  /path/to/project
 ```
 
-IQ-TREE defaults: `-m MFP -bb 1000 -nt AUTO`. Override with `--model` and `--bootstrap`. Use `--input-alignment` to point at a specific alignment (e.g., per-cluster). Output in `families/<family_id>/tree/`.
+Input TSV format:
+```
+clade_name	og_id	node_number
+sugar_transporters_A	OG0000001	42
+sugar_transporters_B	OG0000001	58
+hexose_clade	OG0000005	23
+```
+
+**What it does**:
+- For each entry, finds node N42 (etc.) in the numbered Newick, collects all descendant tips
+- Builds a species × clade gene count matrix (how many genes per species per clade)
+- Re-renders trees with clade highlights (colored subtrees)
+- Generates an iTOL `DATASET_HEATMAP` annotation file for the species tree
+
+Output in `families/<family_id>/clade_mark/`:
+- `clade_count_matrix.tsv` — Species × clade gene count matrix
+- `itol_clade_heatmap.txt` — iTOL annotation file (upload to species tree)
+- `trees/<OG_ID>.pdf` / `trees/svg/<OG_ID>.svg` — Trees with highlighted clades
 
 ### Family directory structure
 
@@ -666,17 +688,14 @@ families/<family_id>/
     merge_<OG_ID>.fa           # Merged OG groups
   place_standalone/            # HMM placement working directory
     placements.tsv             # Placement report (read by og-report)
-  fasta/                       # Only if using build-fasta quick path
-    combined.faa               # Merged/clustered sequences
-    combined.pre_dedup.faa     # Pre-dedup backup (if clustering)
-    cluster_members.tsv        # Cluster membership (if clustering)
-    clusters/                  # Per-cluster FASTAs (if clustering)
-      cluster_summary.tsv      # Cluster sizes + characterized flags
-  alignment/
-    combined.aln               # MAFFT output
-    combined.trimmed.aln       # trimAl output
-  tree/
-    combined.treefile          # IQ-TREE or FastTree output
+  tree_export/                 # Rendered gene trees (from tree-export)
+    trees/<OG_ID>.pdf          # Per-OG PDFs with annotations
+    trees/svg/<OG_ID>.svg      # Per-OG SVGs
+    numbered_newick/<OG_ID>.nwk # Trees with N-numbered internal nodes
+  clade_mark/                  # Clade analysis (from clade-mark)
+    clade_count_matrix.tsv     # Species × clade gene count matrix
+    itol_clade_heatmap.txt     # iTOL annotation for species tree
+    trees/<OG_ID>.pdf          # Trees with highlighted clades
   manifest.json
 ```
 

@@ -17,6 +17,8 @@ dependencies = [
   "requests>=2.32.0",
   "rich>=13.7.0",
   "dendropy>=4.6.0",
+  "toytree>=3.0",
+  "toyplot>=2.1",
 ]
 
 [project.optional-dependencies]

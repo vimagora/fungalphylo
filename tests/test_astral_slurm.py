@@ -88,7 +88,7 @@ def test_astral_prep_collects_trees_and_writes_mapping(tmp_path: Path, monkeypat
     })
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.astral_slurm.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
     )
 
@@ -163,7 +163,7 @@ def test_astral_prep_min_taxa_filters(tmp_path: Path, monkeypatch) -> None:
     })
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.astral_slurm.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
     )
 
@@ -191,7 +191,7 @@ def test_astral_prep_auto_detects_latest_phylo_run(tmp_path: Path, monkeypatch) 
     })
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.astral_slurm.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
     )
 
@@ -222,7 +222,7 @@ def test_astral_prep_submit_mocked(tmp_path: Path, monkeypatch) -> None:
         calls.append(args)
         return SimpleNamespace(stdout="Submitted batch job 12345\n")
 
-    monkeypatch.setattr("fungalphylo.cli.commands.astral_slurm.subprocess.run", _fake_run)
+    monkeypatch.setattr("fungalphylo.core.slurm.subprocess.run", _fake_run)
 
     result = runner.invoke(
         app,

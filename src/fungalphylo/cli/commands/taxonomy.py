@@ -586,11 +586,20 @@ def export_taxonomy(
         "--approved-only",
         help="Export only portals currently present in approvals.",
     ),
+    family_id: str | None = typer.Option(
+        None,
+        "--family-id",
+        help="Export taxonomy template for a gene family's species (portals + standalone).",
+    ),
 ) -> None:
     project_dir = project_dir.expanduser().resolve()
     paths = ProjectPaths(project_dir)
     ensure_project_dirs(paths)
     init_db(paths.db_path)
+
+    if family_id is not None:
+        _export_family_taxonomy(project_dir, paths, family_id, out)
+        return
 
     if out is None:
         review_dir = project_dir / "review"
@@ -650,6 +659,121 @@ def export_taxonomy(
     typer.echo(f"Wrote taxonomy TSV: {out}")
 
 
+def _export_family_taxonomy(
+    project_dir: Path, paths: ProjectPaths, family_id: str, out: Path | None
+) -> None:
+    """Export a taxonomy template for a gene family's species.
+
+    Portal species get pre-filled ncbi_taxon_id from the DB.
+    Standalone species get empty rows for the user to fill in.
+    """
+    char_tsv = paths.family_characterized_dir(family_id) / "characterized.tsv"
+    if not char_tsv.exists():
+        raise typer.BadParameter(f"Characterized TSV not found: {char_tsv}")
+
+    with char_tsv.open(encoding="utf-8") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        char_rows = list(reader)
+
+    # Collect unique species: portal species + standalone species
+    portal_species: dict[str, str] = {}  # portal_id -> species
+    standalone_species: dict[str, str] = {}  # short_name -> species
+    for row in char_rows:
+        portal_id = row.get("portal_id", "").strip()
+        species = row.get("species", "").strip()
+        short_name = row.get("short_name", "").strip()
+        if portal_id:
+            portal_species[portal_id] = species
+        elif short_name:
+            standalone_species[short_name] = species
+
+    # Also include all portals that have selected FASTAs for this family
+    selected_dir = paths.family_selected_dir(family_id)
+    if selected_dir.is_dir():
+        for faa in selected_dir.glob("*.faa"):
+            pid = faa.stem
+            if pid not in portal_species:
+                portal_species[pid] = ""
+
+    # Fetch ncbi_taxon_id for portal species
+    conn = connect(paths.db_path)
+    try:
+        portal_tax: dict[str, int | None] = {}
+        for pid in portal_species:
+            row = conn.execute(
+                "SELECT ncbi_taxon_id, name FROM portals WHERE portal_id = ?", (pid,)
+            ).fetchone()
+            if row:
+                portal_tax[pid] = row["ncbi_taxon_id"]
+                if not portal_species[pid]:
+                    portal_species[pid] = row["name"] or ""
+    finally:
+        conn.close()
+
+    # Resolve taxonomy from taxdump for portal species that have taxon IDs
+    taxdump_dir = paths.cache_dir / "ncbi_taxonomy" / "new_taxdump"
+    names_path = taxdump_dir / "names.dmp"
+    nodes_path = taxdump_dir / "nodes.dmp"
+    have_taxdump = names_path.exists() and nodes_path.exists()
+
+    portal_lineages: dict[str, dict[str, str]] = {}
+    if have_taxdump:
+        names = _load_taxdump_names(names_path)
+        nodes = _load_taxdump_nodes(nodes_path)
+        for pid, tax_id in portal_tax.items():
+            if tax_id:
+                portal_lineages[pid] = _lineage_for_taxid(tax_id, nodes, names)
+
+    # Output path
+    if out is None:
+        config_dir = paths.family_config_dir(family_id)
+        config_dir.mkdir(parents=True, exist_ok=True)
+        out = config_dir / "taxonomy_template.tsv"
+    else:
+        out = out.expanduser().resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    # Write template
+    header = ["short_name", "species", "portal_id", "ncbi_taxon_id"] + TAXONOMY_RANKS
+    with out.open("w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f, delimiter="\t")
+        w.writerow(header)
+
+        # Portal species
+        for pid in sorted(portal_species):
+            species = portal_species[pid]
+            tax_id = portal_tax.get(pid)
+            lineage = portal_lineages.get(pid, {})
+            w.writerow([
+                pid, species, pid,
+                "" if tax_id is None else str(tax_id),
+            ] + [lineage.get(rank, "") for rank in TAXONOMY_RANKS])
+
+        # Standalone species
+        for sn in sorted(standalone_species):
+            species = standalone_species[sn]
+            w.writerow([sn, species, "", ""] + [""] * len(TAXONOMY_RANKS))
+
+    n_portal = len(portal_species)
+    n_standalone = len(standalone_species)
+    log_event(
+        project_dir,
+        {
+            "ts": now_iso(),
+            "event": "taxonomy_export_family",
+            "family_id": family_id,
+            "out": str(out),
+            "n_portal": n_portal,
+            "n_standalone": n_standalone,
+        },
+    )
+    typer.echo(f"Wrote family taxonomy template: {out}")
+    typer.echo(f"  Portal species:     {n_portal} (pre-filled from DB)")
+    typer.echo(f"  Standalone species:  {n_standalone} (fill in taxonomy ranks)")
+    if not have_taxdump:
+        typer.echo("  NOTE: NCBI taxdump not found — run `taxonomy fetch-ncbi` to auto-fill portal lineages.")
+
+
 @app.command("apply")
 def apply_taxonomy(
     project_dir: Path = typer.Argument(..., help="Project directory"),
@@ -660,11 +784,20 @@ def apply_taxonomy(
         "--allow-clear/--no-allow-clear",
         help="Treat blank ncbi_taxon_id values as clearing the stored taxon ID.",
     ),
+    family_id: str | None = typer.Option(
+        None,
+        "--family-id",
+        help="Apply taxonomy for a gene family (stores as families/<id>/config/taxonomy.tsv).",
+    ),
 ) -> None:
     project_dir = project_dir.expanduser().resolve()
     paths = ProjectPaths(project_dir)
     ensure_project_dirs(paths)
     init_db(paths.db_path)
+
+    if family_id is not None:
+        _apply_family_taxonomy(project_dir, paths, family_id, taxonomy_tsv, dry_run)
+        return
 
     portal_col, rows, taxon_col, note_col = _normalized_rows(taxonomy_tsv)
 
@@ -743,6 +876,89 @@ def apply_taxonomy(
     typer.echo(
         f"{mode}: updated={updated} cleared={cleared} unchanged={unchanged} unknown={unknown} invalid={invalid}"
     )
+
+
+def _apply_family_taxonomy(
+    project_dir: Path,
+    paths: ProjectPaths,
+    family_id: str,
+    taxonomy_tsv: Path,
+    dry_run: bool,
+) -> None:
+    """Validate and store a filled-in taxonomy template for a gene family.
+
+    Reads the user-edited TSV (from `taxonomy export --family-id`), validates
+    that required columns and taxonomy ranks are present, and copies it to
+    families/<family_id>/config/taxonomy.tsv as the canonical source.
+    """
+    taxonomy_tsv = taxonomy_tsv.expanduser().resolve()
+    if not taxonomy_tsv.exists():
+        raise typer.BadParameter(f"Taxonomy TSV not found: {taxonomy_tsv}")
+
+    # Validate structure
+    with taxonomy_tsv.open(encoding="utf-8") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        if reader.fieldnames is None:
+            raise typer.BadParameter(f"Taxonomy TSV is empty: {taxonomy_tsv}")
+
+        fieldnames = set(reader.fieldnames)
+        required = {"short_name", "species"}
+        missing = required - fieldnames
+        if missing:
+            raise typer.BadParameter(
+                f"Missing required columns: {', '.join(sorted(missing))}. "
+                f"Found: {', '.join(sorted(fieldnames))}"
+            )
+
+        # Check which taxonomy ranks are present
+        present_ranks = [r for r in TAXONOMY_RANKS if r in fieldnames]
+        if not present_ranks:
+            raise typer.BadParameter(
+                f"No taxonomy rank columns found. Expected at least one of: "
+                f"{', '.join(TAXONOMY_RANKS)}"
+            )
+
+        rows = list(reader)
+
+    if not rows:
+        raise typer.BadParameter(f"Taxonomy TSV has no data rows: {taxonomy_tsv}")
+
+    # Count filled entries
+    n_total = len(rows)
+    n_with_taxonomy = sum(
+        1 for row in rows
+        if any(row.get(rank, "").strip() for rank in present_ranks)
+    )
+
+    if dry_run:
+        typer.echo(f"Dry run — would store {n_total} rows ({n_with_taxonomy} with taxonomy)")
+        typer.echo(f"  Ranks present: {', '.join(present_ranks)}")
+        return
+
+    # Store as canonical taxonomy file
+    config_dir = paths.family_config_dir(family_id)
+    config_dir.mkdir(parents=True, exist_ok=True)
+    dest = config_dir / "taxonomy.tsv"
+
+    import shutil
+    shutil.copy2(taxonomy_tsv, dest)
+
+    log_event(
+        project_dir,
+        {
+            "ts": now_iso(),
+            "event": "taxonomy_apply_family",
+            "family_id": family_id,
+            "source": str(taxonomy_tsv),
+            "dest": str(dest),
+            "n_total": n_total,
+            "n_with_taxonomy": n_with_taxonomy,
+            "ranks": present_ranks,
+        },
+    )
+    typer.echo(f"Applied family taxonomy: {dest}")
+    typer.echo(f"  Species:  {n_total} ({n_with_taxonomy} with taxonomy data)")
+    typer.echo(f"  Ranks:    {', '.join(present_ranks)}")
 
 
 @app.command("busco-mockup")

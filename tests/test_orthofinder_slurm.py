@@ -75,7 +75,7 @@ def test_orthofinder_slurm_writes_script_for_latest_staging(tmp_path: Path, monk
     _write_tools_yaml(paths)
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.orthofinder_slurm.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
     )
 
@@ -139,7 +139,7 @@ def test_orthofinder_slurm_with_env_path(tmp_path: Path, monkeypatch) -> None:
     _write_tools_yaml(paths, env_path=str(tykky_bin))
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.orthofinder_slurm.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
     )
 
@@ -173,7 +173,7 @@ def test_orthofinder_slurm_with_family_id(tmp_path: Path, monkeypatch) -> None:
     (selected_dir / "SpeciesB.faa").write_text(">p2\nMPEPTIDE\n", encoding="utf-8")
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.orthofinder_slurm.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
     )
 
@@ -200,7 +200,7 @@ def test_orthofinder_slurm_with_family_id(tmp_path: Path, monkeypatch) -> None:
     assert f'-f "{selected_dir.as_posix()}"' in script
     assert "2 .faa files" in result.output
 
-    # DB should use __family__ sentinel
+    # DB should have NULL staging_id for family runs
     conn = connect(paths.db_path)
     try:
         row = conn.execute(
@@ -208,7 +208,7 @@ def test_orthofinder_slurm_with_family_id(tmp_path: Path, monkeypatch) -> None:
         ).fetchone()
     finally:
         conn.close()
-    assert row["staging_id"] == "__family__"
+    assert row["staging_id"] is None
 
 
 def test_orthofinder_slurm_with_explicit_input_dir(tmp_path: Path, monkeypatch) -> None:
@@ -221,7 +221,7 @@ def test_orthofinder_slurm_with_explicit_input_dir(tmp_path: Path, monkeypatch) 
     (custom_dir / "sp1.faa").write_text(">p1\nM\n", encoding="utf-8")
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.orthofinder_slurm.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
     )
 
@@ -273,7 +273,7 @@ def test_orthofinder_slurm_submit_mocked(tmp_path: Path, monkeypatch) -> None:
         calls.append(args)
         return SimpleNamespace(stdout="Submitted batch job 54321\n")
 
-    monkeypatch.setattr("fungalphylo.cli.commands.orthofinder_slurm.subprocess.run", _fake_run)
+    monkeypatch.setattr("fungalphylo.core.slurm.subprocess.run", _fake_run)
 
     result = runner.invoke(
         app,
@@ -299,7 +299,7 @@ def test_orthofinder_slurm_resume_refreshes_script(tmp_path: Path, monkeypatch) 
     _write_tools_yaml(paths)
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.orthofinder_slurm.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
     )
 
@@ -373,7 +373,7 @@ def test_orthofinder_slurm_custom_msa_program(tmp_path: Path, monkeypatch) -> No
     _write_tools_yaml(paths)
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.orthofinder_slurm.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
     )
 
@@ -405,7 +405,7 @@ def test_orthofinder_slurm_og_only_flag(tmp_path: Path, monkeypatch) -> None:
     _write_tools_yaml(paths)
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.orthofinder_slurm.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
     )
 
@@ -439,7 +439,7 @@ def test_orthofinder_slurm_og_only_not_set_by_default(tmp_path: Path, monkeypatc
     _write_tools_yaml(paths)
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.orthofinder_slurm.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
     )
 
@@ -473,7 +473,7 @@ def test_orthofinder_slurm_mem_scales_with_proteome_count(tmp_path: Path, monkey
     _write_tools_yaml(paths)
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.orthofinder_slurm.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
     )
 

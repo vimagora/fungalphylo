@@ -62,7 +62,7 @@ def test_protsetphylo_phylo_slurm_writes_scripts(tmp_path: Path, monkeypatch) ->
     _create_family(paths, "mfs_sugar", ["OG0001000", "OG0001001", "OG0001002"])
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.protsetphylo.phylo_slurm.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
     )
 
@@ -141,7 +141,7 @@ def test_protsetphylo_phylo_slurm_iqtree_fast_flag(tmp_path: Path, monkeypatch) 
     _create_family(paths, "abc_trans", ["OG0002000"])
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.protsetphylo.phylo_slurm.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
     )
 
@@ -176,7 +176,7 @@ def test_protsetphylo_phylo_slurm_custom_step_resources(tmp_path: Path, monkeypa
     _create_family(paths, "glyco_hydro", ["OG0003000"])
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.protsetphylo.phylo_slurm.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
     )
 
@@ -239,7 +239,7 @@ def test_protsetphylo_phylo_slurm_uses_og_selected_fallback(
     (og_selected / "OG0000099.fa").write_text(">p1\nM\n", encoding="utf-8")
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.protsetphylo.phylo_slurm.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
     )
 

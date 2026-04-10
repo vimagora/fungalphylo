@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import typer
 
 from fungalphylo.core.events import log_event
-from fungalphylo.core.hash import hash_json
 from fungalphylo.core.ids import now_iso, now_tag
-from fungalphylo.core.manifest import write_manifest
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
-from fungalphylo.core.slurm import infer_account_from_project_dir, shlex_quote
+from fungalphylo.core.slurm import register_run, resolve_account, shlex_quote, submit_sbatch
 from fungalphylo.core.tools import load_tools
 from fungalphylo.db.db import connect, init_db
 
@@ -59,18 +56,7 @@ def interproscan_command(
         raise typer.BadParameter(f"Characterized FASTA not found: {char_fasta}")
 
     # Resolve account
-    acct = account or infer_account_from_project_dir(project_dir)
-    if not acct:
-        raise typer.BadParameter(
-            "Could not infer SLURM account. Provide --account explicitly."
-        )
-    if not no_confirm and account is None:
-        ok = typer.confirm(
-            f"Detected SLURM account '{acct}' from project_dir. Use this account?",
-            default=True,
-        )
-        if not ok:
-            raise typer.BadParameter("Account not confirmed.")
+    acct = resolve_account(project_dir, account, no_confirm)
 
     bin_dir = (
         interproscan_bin_dir.expanduser().resolve()
@@ -167,35 +153,11 @@ fi
             "mem": mem,
         },
     }
-    manifest_path = paths.run_manifest(rid)
-    write_manifest(manifest_path, manifest_data)
-    manifest_sha256 = hash_json(manifest_data)
+    register_run(paths, project_dir, rid, "family_interproscan", created_at, manifest_data)
 
-    # We need a staging_id for runs table — use a sentinel for family runs
+    # Link run to family
     conn = connect(paths.db_path)
     try:
-        # Ensure a sentinel staging exists for family runs
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO stagings(staging_id, created_at, manifest_path, manifest_sha256)
-            VALUES('__family__', ?, '__family__', '__family__')
-            """,
-            (created_at,),
-        )
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO runs(run_id, staging_id, kind, created_at, manifest_path, manifest_sha256)
-            VALUES(?,?,?,?,?,?)
-            """,
-            (
-                rid,
-                "__family__",
-                "family_interproscan",
-                created_at,
-                str(manifest_path.relative_to(project_dir)),
-                manifest_sha256,
-            ),
-        )
         conn.execute(
             "UPDATE families SET ipr_run_id = ? WHERE family_id = ?",
             (rid, family_id),
@@ -222,15 +184,5 @@ fi
     typer.echo(f"  Output TSV: {output_tsv}")
 
     if submit:
-        try:
-            res = subprocess.run(
-                ["sbatch", str(worker_path)],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            typer.echo(res.stdout.strip() or "Submitted.")
-        except FileNotFoundError:
-            raise RuntimeError("sbatch not found on PATH. Submit manually.") from None
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"sbatch failed: {e.stderr.strip() if e.stderr else str(e)}") from e
+        stdout = submit_sbatch(worker_path)
+        typer.echo(stdout or "Submitted.")

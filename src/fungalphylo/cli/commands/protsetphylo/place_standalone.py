@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
 import typer
@@ -9,7 +8,7 @@ import typer
 from fungalphylo.core.events import log_event
 from fungalphylo.core.ids import now_iso, now_tag
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
-from fungalphylo.core.slurm import infer_account_from_project_dir
+from fungalphylo.core.slurm import register_run, resolve_account, submit_sbatch
 from fungalphylo.core.tools import bin_dir_export_lines, load_tools
 from fungalphylo.db.db import init_db
 
@@ -243,18 +242,7 @@ def place_standalone_command(
     og_placed_dir = paths.family_og_placed_dir(family_id)
 
     # Account
-    inferred = infer_account_from_project_dir(project_dir)
-    acct = account or inferred
-    if not acct:
-        raise typer.BadParameter(
-            "Could not infer SLURM account. Provide --account explicitly."
-        )
-    if not no_confirm and account is None:
-        ok = typer.confirm(
-            f"Detected SLURM account '{acct}'. Use this account?", default=True,
-        )
-        if not ok:
-            raise typer.BadParameter("Account not confirmed. Re-run with --account.")
+    acct = resolve_account(project_dir, account, no_confirm)
 
     # Defaults
     rid = f"place_{family_id}_{now_tag()}"
@@ -301,6 +289,45 @@ def place_standalone_command(
 
     n_standalone = sum(1 for f in standalone_files for _ in f.read_text().splitlines() if _.startswith(">"))
 
+    # Manifest + DB
+    created_at = now_iso()
+    manifest_data = {
+        "run_id": rid,
+        "kind": "place_standalone",
+        "created_at": created_at,
+        "family_id": family_id,
+        "source_run_id": run_id,
+        "project_dir": str(project_dir),
+        "paths": {
+            "script": str(script_path),
+            "og_sequences_dir": str(og_sequences_dir),
+            "og_placed_dir": str(og_placed_dir),
+            "work_dir": str(work_dir),
+            "standalone_dir": str(standalone_dir),
+        },
+        "stats": {
+            "n_ogs": len(og_files),
+            "n_standalone_files": len(standalone_files),
+            "n_standalone_seqs": n_standalone,
+        },
+        "parameters": {
+            "evalue": evalue,
+        },
+        "slurm": {
+            "account": acct,
+            "partition": partition,
+            "time": time,
+            "cpus": cpus,
+            "mem_per_cpu": mem_per_cpu,
+            "submit": submit,
+        },
+    }
+
+    # place_standalone stores scripts under family dir, not runs/; create a run entry anyway
+    run_root = paths.run_dir(rid)
+    run_root.mkdir(parents=True, exist_ok=True)
+    register_run(paths, project_dir, rid, "place_standalone", created_at, manifest_data)
+
     typer.echo(f"Wrote place-standalone SLURM script: {script_path}")
     typer.echo(f"OGs to profile:      {len(og_files)}")
     typer.echo(f"Standalone files:    {len(standalone_files)} ({n_standalone} sequences)")
@@ -311,10 +338,10 @@ def place_standalone_command(
     log_event(
         project_dir,
         {
-            "ts": now_iso(),
+            "ts": created_at,
             "event": "protsetphylo_place_standalone",
             "family_id": family_id,
-            "run_id": run_id,
+            "run_id": rid,
             "n_ogs": len(og_files),
             "n_standalone_files": len(standalone_files),
             "n_standalone_seqs": n_standalone,
@@ -327,16 +354,5 @@ def place_standalone_command(
     )
 
     if submit:
-        try:
-            res = subprocess.run(
-                ["sbatch", str(script_path)], check=True, capture_output=True, text=True
-            )
-            typer.echo(res.stdout.strip() or "Submitted.")
-        except FileNotFoundError:
-            raise RuntimeError(
-                "sbatch not found on PATH. Submit manually with: sbatch <script>"
-            ) from None
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(
-                f"sbatch failed: {e.stderr.strip() if e.stderr else str(e)}"
-            ) from e
+        stdout = submit_sbatch(script_path)
+        typer.echo(stdout or "Submitted.")

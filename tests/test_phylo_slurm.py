@@ -67,7 +67,7 @@ def test_phylo_slurm_writes_orchestrator_and_worker(tmp_path: Path, monkeypatch)
     _seed_filtered_ogs(paths, "of_run1", ["OG0000001", "OG0000002", "OG0000003"])
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.phylo_slurm.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
     )
 
@@ -155,7 +155,7 @@ def test_phylo_slurm_auto_finds_filtered_ogs(tmp_path: Path, monkeypatch) -> Non
     _seed_filtered_ogs(paths, "of_auto", ["OG0000001"])
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.phylo_slurm.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
     )
 
@@ -182,7 +182,7 @@ def test_phylo_slurm_explicit_input_dir(tmp_path: Path, monkeypatch) -> None:
     (custom_dir / "OG0000001.fa").write_text(">p1\nM\n", encoding="utf-8")
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.phylo_slurm.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
     )
 
@@ -207,7 +207,7 @@ def test_phylo_slurm_custom_parameters(tmp_path: Path, monkeypatch) -> None:
     _seed_filtered_ogs(paths, "of_params", ["OG0000001"])
 
     monkeypatch.setattr(
-        "fungalphylo.cli.commands.phylo_slurm.subprocess.run",
+        "fungalphylo.core.slurm.subprocess.run",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
     )
 
@@ -262,7 +262,7 @@ def test_phylo_slurm_submit_mocked(tmp_path: Path, monkeypatch) -> None:
         calls.append(args)
         return SimpleNamespace(stdout="Submitted job 99999\n")
 
-    monkeypatch.setattr("fungalphylo.cli.commands.phylo_slurm.subprocess.run", _fake_run)
+    monkeypatch.setattr("fungalphylo.core.slurm.subprocess.run", _fake_run)
 
     result = runner.invoke(
         app,
