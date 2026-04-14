@@ -145,7 +145,12 @@ def _tip_to_species(tip_label: str, delimiter: str = "|") -> str:
 # ---------------------------------------------------------------------------
 
 def _load_taxonomy(paths: ProjectPaths, family_id: str) -> dict[str, dict[str, str]]:
-    """Load resolved taxonomy TSV. Returns {short_name: {rank: value}}."""
+    """Load resolved taxonomy TSV.
+
+    Returns a lookup keyed by both ``short_name`` and ``portal_id`` so that
+    tree tips coming in via either identifier resolve to the same lineage.
+    The ``short_name`` key wins on collision.
+    """
     tax_path = paths.family_config_dir(family_id) / "taxonomy.tsv"
     if not tax_path.exists():
         return {}
@@ -153,9 +158,17 @@ def _load_taxonomy(paths: ProjectPaths, family_id: str) -> dict[str, dict[str, s
     with tax_path.open(encoding="utf-8") as fh:
         reader = csv.DictReader(fh, delimiter="\t")
         for row in reader:
+            ranks = {
+                k: (v or "").strip()
+                for k, v in row.items()
+                if k not in ("short_name", "portal_id")
+            }
+            portal_id = (row.get("portal_id") or "").strip()
+            if portal_id and portal_id not in result:
+                result[portal_id] = ranks
             sn = (row.get("short_name") or "").strip()
             if sn:
-                result[sn] = {k: (v or "").strip() for k, v in row.items() if k != "short_name"}
+                result[sn] = ranks
     return result
 
 
