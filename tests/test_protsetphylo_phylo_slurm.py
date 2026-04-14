@@ -272,3 +272,114 @@ def test_protsetphylo_phylo_slurm_no_family_errors(tmp_path: Path) -> None:
     )
     assert result.exit_code != 0
     assert "Family not found" in result.output
+
+
+def test_protsetphylo_phylo_slurm_with_outgroups(tmp_path: Path, monkeypatch) -> None:
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+    _write_tools_yaml(paths)
+    _create_family(paths, "og_fam", ["OG0001000", "OG0001001", "OG0001002"])
+
+    monkeypatch.setattr(
+        "fungalphylo.core.slurm.subprocess.run",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
+    )
+
+    outgroup_fasta = tmp_path / "outgroups.faa"
+    outgroup_fasta.write_text(
+        ">OutA|prot1\nMMMMMM\n>OutB|prot2\nKKKKKK\n",
+        encoding="utf-8",
+    )
+    outgroup_map = tmp_path / "outgroups.tsv"
+    outgroup_map.write_text(
+        "og_id\toutgroup_id\n"
+        "OG0001000\tOutA|prot1\n"
+        "OG0001000\tOutB|prot2\n"
+        "OG0001002\tOutA|prot1\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "protsetphylo", "phylo-slurm",
+            "--family-id", "og_fam",
+            "--account", "project_123",
+            "--output-run-id", "phylo_og_test",
+            "--outgroup-fasta", str(outgroup_fasta),
+            "--outgroup-map", str(outgroup_map),
+            str(project_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Outgrouped:   2 OGs" in result.output
+
+    run_root = project_dir / "runs/phylo_og_test"
+    aug_dir = run_root / "augmented_input"
+    assert (aug_dir / "OG0001000.fa").exists()
+    assert (aug_dir / "OG0001002.fa").exists()
+    assert not (aug_dir / "OG0001001.fa").exists()  # no outgroup mapping
+
+    aug_text = (aug_dir / "OG0001000.fa").read_text(encoding="utf-8")
+    assert ">OutA|prot1" in aug_text
+    assert ">OutB|prot2" in aug_text
+    assert ">OG0001000_Sp1|p1" in aug_text  # original records preserved
+
+    tips_tsv = (run_root / "slurm" / "outgroup_tips.tsv").read_text(encoding="utf-8")
+    lines = dict(line.split("\t", 1) for line in tips_tsv.strip().splitlines())
+    assert lines["OG0001000"] == "OutA|prot1,OutB|prot2"
+    assert lines["OG0001002"] == "OutA|prot1"
+    assert "OG0001001" not in lines
+
+    # Filelist should point at augmented files for outgrouped OGs, originals otherwise
+    filelist = (run_root / "slurm" / "og_filelist.txt").read_text(encoding="utf-8")
+    assert str(aug_dir / "OG0001000.fa") in filelist
+    assert str(aug_dir / "OG0001002.fa") in filelist
+    assert str(paths.family_og_placed_dir("og_fam") / "OG0001001.fa") in filelist
+
+    # Worker script reads the tips file and passes -o
+    worker = (run_root / "slurm" / "phylo_worker.sbatch").read_text(encoding="utf-8")
+    assert "outgroup_tips.tsv" in worker
+    assert "IQTREE_O_FLAG" in worker
+    assert "-o $OG_OUTGROUPS" in worker
+
+    # Manifest records outgroup settings
+    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["parameters"]["n_outgrouped_ogs"] == 2
+    assert manifest["parameters"]["outgroup_fasta"] == str(outgroup_fasta)
+    assert manifest["parameters"]["outgroup_map"] == str(outgroup_map)
+
+
+def test_protsetphylo_phylo_slurm_outgroup_unknown_og_errors(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+    _write_tools_yaml(paths)
+    _create_family(paths, "og_fam2", ["OG0001000"])
+
+    monkeypatch.setattr(
+        "fungalphylo.core.slurm.subprocess.run",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not submit")),
+    )
+
+    outgroup_fasta = tmp_path / "outgroups.faa"
+    outgroup_fasta.write_text(">OutA|prot1\nMMMM\n", encoding="utf-8")
+    outgroup_map = tmp_path / "outgroups.tsv"
+    outgroup_map.write_text(
+        "og_id\toutgroup_id\nOG9999999\tOutA|prot1\n", encoding="utf-8"
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "protsetphylo", "phylo-slurm",
+            "--family-id", "og_fam2",
+            "--account", "project_123",
+            "--outgroup-fasta", str(outgroup_fasta),
+            "--outgroup-map", str(outgroup_map),
+            str(project_dir),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "OG9999999" in result.output

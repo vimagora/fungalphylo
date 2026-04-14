@@ -1,16 +1,123 @@
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 
 import typer
 
 from fungalphylo.core.events import log_event
+from fungalphylo.core.fasta import FastaRecord, iter_fasta, write_fasta
 from fungalphylo.core.ids import now_iso, now_tag
 from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.core.slurm import register_run, resolve_account, submit_sbatch
 from fungalphylo.core.tools import bin_dir_export_lines, load_tools
 from fungalphylo.db.db import connect, init_db
+
+
+def _load_outgroup_fasta(path: Path) -> dict[str, FastaRecord]:
+    records: dict[str, FastaRecord] = {}
+    for rec in iter_fasta(path):
+        key = rec.header.split()[0]
+        if key in records:
+            raise typer.BadParameter(
+                f"Duplicate outgroup header {key!r} in {path}"
+            )
+        records[key] = rec
+    if not records:
+        raise typer.BadParameter(f"No records found in outgroup FASTA: {path}")
+    return records
+
+
+def _load_outgroup_map(path: Path) -> dict[str, list[str]]:
+    """Parse outgroup mapping TSV. Columns: og_id, outgroup_id."""
+    with path.open(encoding="utf-8") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        if reader.fieldnames is None:
+            raise typer.BadParameter(f"Empty outgroup map TSV: {path}")
+        required = {"og_id", "outgroup_id"}
+        missing = required - set(reader.fieldnames)
+        if missing:
+            raise typer.BadParameter(
+                f"Missing columns in outgroup map TSV: {', '.join(sorted(missing))}. "
+                f"Found: {', '.join(reader.fieldnames)}"
+            )
+        mapping: dict[str, list[str]] = {}
+        for row in reader:
+            og_id = (row.get("og_id") or "").strip()
+            og_id = og_id.removesuffix(".fa")
+            outgroup_id = (row.get("outgroup_id") or "").strip()
+            if not og_id or not outgroup_id:
+                continue
+            lst = mapping.setdefault(og_id, [])
+            if outgroup_id not in lst:
+                lst.append(outgroup_id)
+    if not mapping:
+        raise typer.BadParameter(f"No (og_id, outgroup_id) rows in: {path}")
+    return mapping
+
+
+def _prepare_outgrouped_inputs(
+    og_files: list[Path],
+    outgroup_records: dict[str, FastaRecord],
+    outgroup_map: dict[str, list[str]],
+    augmented_dir: Path,
+) -> tuple[list[Path], dict[str, list[str]]]:
+    """Return (final_og_files, outgroup_tips_per_og).
+
+    For each OG with a mapping, write an augmented FASTA (original + mapped
+    outgroup records) into ``augmented_dir`` and substitute the path. OGs
+    without a mapping are passed through unchanged. Validates that every OG
+    referenced in the map exists and that every outgroup_id is in the FASTA.
+    """
+    og_name_to_path = {p.stem: p for p in og_files}
+
+    unknown_ogs = sorted(set(outgroup_map) - set(og_name_to_path))
+    if unknown_ogs:
+        raise typer.BadParameter(
+            "Outgroup map references OGs not present in input dir: "
+            + ", ".join(unknown_ogs)
+        )
+
+    all_tip_ids = {
+        tip for tips in outgroup_map.values() for tip in tips
+    }
+    unknown_tips = sorted(all_tip_ids - set(outgroup_records))
+    if unknown_tips:
+        raise typer.BadParameter(
+            "Outgroup map references outgroup_id(s) not in outgroup FASTA: "
+            + ", ".join(unknown_tips)
+        )
+
+    augmented_dir.mkdir(parents=True, exist_ok=True)
+    final_files: list[Path] = []
+    tips_per_og: dict[str, list[str]] = {}
+    for og_path in og_files:
+        og_name = og_path.stem
+        if og_name not in outgroup_map:
+            final_files.append(og_path)
+            continue
+        tip_ids = outgroup_map[og_name]
+        merged = list(iter_fasta(og_path))
+        existing_headers = {r.header.split()[0] for r in merged}
+        for tid in tip_ids:
+            rec = outgroup_records[tid]
+            if tid in existing_headers:
+                # Already present in the OG — skip, still root on it.
+                continue
+            merged.append(rec)
+        out_path = augmented_dir / f"{og_name}.fa"
+        write_fasta(merged, out_path)
+        final_files.append(out_path)
+        tips_per_og[og_name] = [outgroup_records[t].header.split()[0] for t in tip_ids]
+    return final_files, tips_per_og
+
+
+def _write_outgroup_tips_tsv(tips_per_og: dict[str, list[str]], out_path: Path) -> None:
+    with out_path.open("w", encoding="utf-8", newline="") as fh:
+        w = csv.writer(fh, delimiter="\t")
+        for og_name in sorted(tips_per_og):
+            w.writerow([og_name, ",".join(tips_per_og[og_name])])
 
 
 def _find_og_input_dir(paths: ProjectPaths, family_id: str) -> Path:
@@ -147,8 +254,12 @@ def _render_worker(
     iqtree_bootstrap: int,
     iqtree_alrt: int,
     iqtree_fast: bool,
+    outgroup_tips_path: Path | None,
 ) -> str:
     fast_flag = " -fast" if iqtree_fast else ""
+    outgroup_tips_literal = (
+        outgroup_tips_path.as_posix() if outgroup_tips_path is not None else ""
+    )
     return f"""#!/bin/bash
 #SBATCH --job-name=phylo_{rid}
 #SBATCH --output={logs_dir.as_posix()}/%x_%A_%a.out
@@ -186,6 +297,13 @@ mkdir -p "$OUTDIR"
 
 ALIGNED="$OUTDIR/$OG_NAME.aligned.faa"
 TRIMMED="$OUTDIR/$OG_NAME.trimmed.faa"
+
+# Resolve outgroup tips for this OG (if any)
+OUTGROUP_TIPS_FILE="{outgroup_tips_literal}"
+OG_OUTGROUPS=""
+if [ -n "$OUTGROUP_TIPS_FILE" ] && [ -s "$OUTGROUP_TIPS_FILE" ]; then
+    OG_OUTGROUPS=$(awk -F'\\t' -v og="$OG_NAME" '$1==og{{print $2; exit}}' "$OUTGROUP_TIPS_FILE")
+fi
 
 echo "=== Task $SLURM_ARRAY_TASK_ID | Step: $STEP | OG: $OG_NAME ==="
 
@@ -226,9 +344,14 @@ case "$STEP" in
                 exit 1
             fi
             echo "--- IQ-TREE ---"
+            IQTREE_O_FLAG=""
+            if [ -n "$OG_OUTGROUPS" ]; then
+                IQTREE_O_FLAG="-o $OG_OUTGROUPS"
+                echo "Rooting on outgroup(s): $OG_OUTGROUPS"
+            fi
             "{iqtree_cmd}" -s "$TRIMMED" \\
               -m {iqtree_model} -B {iqtree_bootstrap} -alrt {iqtree_alrt} \\
-              -T "$THREADS"{fast_flag} --prefix "$OUTDIR/$OG_NAME"
+              -T "$THREADS"{fast_flag} $IQTREE_O_FLAG --prefix "$OUTDIR/$OG_NAME"
         else
             echo "Tree exists, skipping."
         fi
@@ -289,6 +412,14 @@ def phylo_slurm_command(
     iqtree_fast: bool = typer.Option(
         False, "--iqtree-fast", help="Use IQ-TREE -fast mode for quicker tree inference"
     ),
+    outgroup_fasta: Path | None = typer.Option(
+        None, "--outgroup-fasta",
+        help="FASTA of outgroup sequences (headers become iqtree -o tip labels).",
+    ),
+    outgroup_map: Path | None = typer.Option(
+        None, "--outgroup-map",
+        help="TSV mapping outgroups to OGs. Columns: og_id, outgroup_id.",
+    ),
     submit: bool = typer.Option(
         False, "--submit", help="Run orchestrator after writing scripts"
     ),
@@ -325,6 +456,24 @@ def phylo_slurm_command(
     if not og_files:
         raise typer.BadParameter(f"No .fa files in {og_dir}")
 
+    # Validate outgroup arguments: both or neither.
+    if (outgroup_fasta is None) != (outgroup_map is None):
+        raise typer.BadParameter(
+            "--outgroup-fasta and --outgroup-map must be provided together."
+        )
+
+    outgroup_records: dict[str, FastaRecord] = {}
+    outgroup_mapping: dict[str, list[str]] = {}
+    if outgroup_fasta is not None and outgroup_map is not None:
+        outgroup_fasta = outgroup_fasta.expanduser().resolve()
+        outgroup_map = outgroup_map.expanduser().resolve()
+        if not outgroup_fasta.exists():
+            raise typer.BadParameter(f"Outgroup FASTA not found: {outgroup_fasta}")
+        if not outgroup_map.exists():
+            raise typer.BadParameter(f"Outgroup map TSV not found: {outgroup_map}")
+        outgroup_records = _load_outgroup_fasta(outgroup_fasta)
+        outgroup_mapping = _load_outgroup_map(outgroup_map)
+
     n_ogs = len(og_files)
 
     # Account
@@ -343,6 +492,18 @@ def phylo_slurm_command(
     slurm_dir.mkdir(parents=True, exist_ok=True)
     output_root.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Preprocess outgroups: write augmented FASTAs into the run dir,
+    # substitute paths in the filelist, and emit the per-OG tips TSV.
+    outgroup_tips_path: Path | None = None
+    tips_per_og: dict[str, list[str]] = {}
+    if outgroup_mapping:
+        augmented_dir = run_root / "augmented_input"
+        og_files, tips_per_og = _prepare_outgrouped_inputs(
+            og_files, outgroup_records, outgroup_mapping, augmented_dir
+        )
+        outgroup_tips_path = slurm_dir / "outgroup_tips.tsv"
+        _write_outgroup_tips_tsv(tips_per_og, outgroup_tips_path)
 
     # Write file list
     filelist_path = slurm_dir / "og_filelist.txt"
@@ -374,6 +535,7 @@ def phylo_slurm_command(
         iqtree_bootstrap=iqtree_bootstrap,
         iqtree_alrt=iqtree_alrt,
         iqtree_fast=iqtree_fast,
+        outgroup_tips_path=outgroup_tips_path,
     )
 
     orchestrator_script = _render_orchestrator(
@@ -424,6 +586,9 @@ def phylo_slurm_command(
             "iqtree_alrt": iqtree_alrt,
             "iqtree_fast": iqtree_fast,
             "mafft_mode": "auto",
+            "outgroup_fasta": str(outgroup_fasta) if outgroup_fasta else None,
+            "outgroup_map": str(outgroup_map) if outgroup_map else None,
+            "n_outgrouped_ogs": len(tips_per_og),
         },
         "slurm": {
             "account": acct,
@@ -471,6 +636,8 @@ def phylo_slurm_command(
     typer.echo(f"  Orchestrator: {orchestrator_path}")
     typer.echo(f"  Worker:       {worker_path}")
     typer.echo(f"  Orthogroups:  {n_ogs} total (max {max_array_size} per submission)")
+    if tips_per_og:
+        typer.echo(f"  Outgrouped:   {len(tips_per_og)} OGs (augmented FASTAs in {run_root / 'augmented_input'})")
     typer.echo(f"  Output:       {output_root}")
     typer.echo(f"  Steps:        align ({align_time}, {align_cpus}cpu, {align_mem_per_cpu}/cpu)")
     typer.echo(f"                trim  ({trim_time}, {trim_cpus}cpu, {trim_mem_per_cpu}/cpu)")
