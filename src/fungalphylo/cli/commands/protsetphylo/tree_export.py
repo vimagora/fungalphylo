@@ -96,32 +96,29 @@ def _number_internal_nodes(tree: dendropy.Tree) -> dendropy.Tree:
     return tree
 
 
-_TIP_LABEL_RE = re.compile(r"([(,])([^(),:;]+)")
+def _itol_id(tip_label: str) -> str:
+    """Normalize a tip label to the form iTOL stores it in.
 
-
-def _quote_tip_labels_with_underscores(newick: str) -> str:
-    """Wrap any unquoted leaf labels containing ``_`` in single quotes.
-
-    iTOL follows the classic newick convention of converting unquoted
-    underscores into spaces, which breaks annotation-to-tip matching. Quoting
-    the offending labels preserves them verbatim. Internal labels (which appear
-    after ``)`` in newick) are not matched and therefore untouched.
+    iTOL silently converts underscores in tree tip labels into spaces when
+    rendering, but does NOT apply that same conversion to annotation-file IDs.
+    The result is that an annotation row for ``foo_a|prot_1`` never matches
+    the rendered tip ``foo a|prot 1``. We work around it by replacing ``_``
+    with `` `` on BOTH the numbered newick and every annotation-file ID, so
+    the two sides stay aligned.
     """
-
-    def repl(match: re.Match) -> str:
-        prefix = match.group(1)
-        label = match.group(2)
-        if "_" not in label:
-            return match.group(0)
-        if label.startswith("'") and label.endswith("'"):
-            return match.group(0)
-        return f"{prefix}'{label}'"
-
-    return _TIP_LABEL_RE.sub(repl, newick)
+    return tip_label.replace("_", " ")
 
 
 def _write_numbered_newick(tree: dendropy.Tree, out_path: Path) -> None:
-    """Write tree with numbered internal labels to a newick file."""
+    """Write tree with numbered internal labels to a newick file.
+
+    Underscores are replaced with spaces in the whole output — tip labels
+    need the spaces so iTOL's rendering matches the IDs we emit in the
+    annotation files (see ``_itol_id``), and internal node labels never
+    contain ``_`` (``N<idx>`` or ``95/88/N<idx>``) so the blanket replace
+    is safe. The in-memory tree is left untouched so downstream taxonomy
+    and characterized lookups still see the original labels.
+    """
     text = tree.as_string(
         schema="newick",
         suppress_internal_node_labels=False,
@@ -130,7 +127,7 @@ def _write_numbered_newick(tree: dendropy.Tree, out_path: Path) -> None:
     # Dendropy may prefix with "[&R]" or similar — strip any leading metadata.
     if text.startswith("[") and "]" in text:
         text = text.split("]", 1)[1].strip()
-    text = _quote_tip_labels_with_underscores(text)
+    text = text.replace("_", " ")
     out_path.write_text(text + "\n", encoding="utf-8")
 
 
@@ -285,7 +282,7 @@ def _write_colorstrip(
         if not value:
             continue
         color = color_map.get(value, "#cccccc")
-        lines.append(f"{tip}\t{color}\t{value}")
+        lines.append(f"{_itol_id(tip)}\t{color}\t{value}")
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -316,7 +313,7 @@ def _write_binary(
     for tip in sorted(tip_sets):
         values = tip_sets[tip]
         row = ["1" if fl in values else "0" for fl in field_labels]
-        lines.append(f"{tip}\t" + "\t".join(row))
+        lines.append(f"{_itol_id(tip)}\t" + "\t".join(row))
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -343,7 +340,7 @@ def _write_symbol(
     ]
     # Format: ID  symbol  size  color  fill  position
     for tip in sorted(tips):
-        lines.append(f"{tip}\t{symbol_code}\t{size}\t{color}\t1\t1")
+        lines.append(f"{_itol_id(tip)}\t{symbol_code}\t{size}\t{color}\t1\t1")
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

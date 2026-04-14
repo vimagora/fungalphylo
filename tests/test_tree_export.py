@@ -254,13 +254,19 @@ def test_tree_export_heatmap_unknown_group_errors(tmp_path: Path) -> None:
     assert "group_missing" in result.output
 
 
-def test_tree_export_quotes_underscored_tip_labels(tmp_path: Path) -> None:
+def test_tree_export_strips_underscores_for_itol(tmp_path: Path) -> None:
+    """iTOL rewrites underscores → spaces in tip labels but NOT in annotation
+    IDs. We pre-apply the same substitution on both sides so the two match.
+    """
     project_dir = tmp_path / "project"
     paths = _init_project(project_dir)
 
     _seed_phylo_run(paths, "phylo_us", {
         "OG0001": "((foo_a|prot_1:0.1,SpB|p2:0.2):0.3,(SpC|p3:0.3,SpD|p4:0.4):0.5);",
     })
+    _seed_characterized(paths, "us_fam", [
+        {"short_name": "foo_a", "species": "Sp A", "portal_id": "", "group_function": "transporter"},
+    ])
 
     result = runner.invoke(
         app,
@@ -268,15 +274,27 @@ def test_tree_export_quotes_underscored_tip_labels(tmp_path: Path) -> None:
             "protsetphylo", "tree-export",
             "--family-id", "us_fam",
             "--run-id", "phylo_us",
+            "--color-bar", "group_function",
             str(project_dir),
         ],
     )
     assert result.exit_code == 0, result.output
 
-    nwk = (
-        paths.family_dir("us_fam") / "tree_export" / "itol" / "OG0001" / "tree.nwk"
-    ).read_text(encoding="utf-8")
-    assert "'foo_a|prot_1'" in nwk
+    og_dir = paths.family_dir("us_fam") / "tree_export" / "itol" / "OG0001"
+    nwk = (og_dir / "tree.nwk").read_text(encoding="utf-8")
+    # Underscores replaced with spaces everywhere in the newick.
+    assert "foo a|prot 1" in nwk
+    assert "_" not in nwk
+
+    # Annotation file IDs must use the same spaced form.
+    cb_text = (og_dir / "dataset_colorbar_group_function.txt").read_text(encoding="utf-8")
+    foo_line = next(
+        line for line in cb_text.splitlines() if line.startswith("foo a|prot 1\t")
+    )
+    assert "transporter" in foo_line
+    # The landmark dataset (characterized star) is keyed the same way.
+    lm_text = (og_dir / "dataset_landmarks.txt").read_text(encoding="utf-8")
+    assert any(line.startswith("foo a|prot 1\t") for line in lm_text.splitlines())
 
 
 def test_tree_export_taxonomy_for_portal_characterized(tmp_path: Path) -> None:
@@ -321,15 +339,15 @@ def test_tree_export_taxonomy_for_portal_characterized(tmp_path: Path) -> None:
 
     og_dir = paths.family_dir("pc_fam") / "tree_export" / "itol" / "OG0001"
     order_txt = (og_dir / "dataset_tax_order.txt").read_text(encoding="utf-8")
-    # Annotation-file IDs are unquoted (iTOL matches the post-parse label).
-    assert "foo_a|prot1\t" in order_txt
-    # The portal-characterized tip must resolve taxonomy via Aspnid1's lineage.
-    foo_line = next(line for line in order_txt.splitlines() if line.startswith("foo_a|prot1\t"))
+    # Annotation-file IDs use the iTOL-normalized form (spaces for underscores).
+    foo_line = next(
+        line for line in order_txt.splitlines() if line.startswith("foo a|prot1\t")
+    )
     assert "Eurotiales" in foo_line
 
-    # The newick itself must quote the underscored tip so iTOL preserves the "_".
+    # The newick tip label is also written with the space form.
     nwk = (og_dir / "tree.nwk").read_text(encoding="utf-8")
-    assert "'foo_a|prot1'" in nwk
+    assert "foo a|prot1" in nwk
 
 
 def test_tree_export_auto_detects_latest_run(tmp_path: Path) -> None:

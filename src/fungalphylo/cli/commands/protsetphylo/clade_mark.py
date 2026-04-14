@@ -17,6 +17,7 @@ import typer
 
 from fungalphylo.cli.commands.protsetphylo.tree_export import (
     _PALETTE,
+    _itol_id,
     _tip_to_species,
 )
 from fungalphylo.core.events import log_event
@@ -158,7 +159,7 @@ def _write_og_clade_colorstrip(
         if not clade:
             continue
         color = clade_colors.get(clade, "#cccccc")
-        lines.append(f"{tip}\t{color}\t{clade}")
+        lines.append(f"{_itol_id(tip)}\t{color}\t{clade}")
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -183,7 +184,7 @@ def _write_species_heatmap(
     ]
     for sp in species_list:
         vals = [str(matrix[sp][cl]) for cl in clade_list]
-        lines.append(f"{sp}\t" + "\t".join(vals))
+        lines.append(f"{_itol_id(sp)}\t" + "\t".join(vals))
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
