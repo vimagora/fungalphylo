@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -72,7 +73,9 @@ def _load_tree(newick_path: Path) -> dendropy.Tree:
     text = newick_path.read_text(encoding="utf-8").strip()
     if not text:
         raise ValueError(f"Empty tree file: {newick_path}")
-    return dendropy.Tree.get(data=text, schema="newick")
+    # preserve_underscores=True keeps tip labels like "Aspnid1|prot_123" intact
+    # (without it dendropy turns "_" into " " per the newick standard).
+    return dendropy.Tree.get(data=text, schema="newick", preserve_underscores=True)
 
 
 def _number_internal_nodes(tree: dendropy.Tree) -> dendropy.Tree:
@@ -93,6 +96,30 @@ def _number_internal_nodes(tree: dendropy.Tree) -> dendropy.Tree:
     return tree
 
 
+_TIP_LABEL_RE = re.compile(r"([(,])([^(),:;]+)")
+
+
+def _quote_tip_labels_with_underscores(newick: str) -> str:
+    """Wrap any unquoted leaf labels containing ``_`` in single quotes.
+
+    iTOL follows the classic newick convention of converting unquoted
+    underscores into spaces, which breaks annotation-to-tip matching. Quoting
+    the offending labels preserves them verbatim. Internal labels (which appear
+    after ``)`` in newick) are not matched and therefore untouched.
+    """
+
+    def repl(match: re.Match) -> str:
+        prefix = match.group(1)
+        label = match.group(2)
+        if "_" not in label:
+            return match.group(0)
+        if label.startswith("'") and label.endswith("'"):
+            return match.group(0)
+        return f"{prefix}'{label}'"
+
+    return _TIP_LABEL_RE.sub(repl, newick)
+
+
 def _write_numbered_newick(tree: dendropy.Tree, out_path: Path) -> None:
     """Write tree with numbered internal labels to a newick file."""
     text = tree.as_string(
@@ -103,6 +130,7 @@ def _write_numbered_newick(tree: dendropy.Tree, out_path: Path) -> None:
     # Dendropy may prefix with "[&R]" or similar — strip any leading metadata.
     if text.startswith("[") and "]" in text:
         text = text.split("]", 1)[1].strip()
+    text = _quote_tip_labels_with_underscores(text)
     out_path.write_text(text + "\n", encoding="utf-8")
 
 

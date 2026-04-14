@@ -664,11 +664,18 @@ def _export_family_taxonomy(
 ) -> None:
     """Export a taxonomy template for a gene family's species.
 
-    Mirrors the species-dataset export: outputs short_name, species,
-    portal_id, ncbi_taxon_id, note.  Portal species get ncbi_taxon_id
-    pre-filled from the DB; standalone species get an empty cell for
-    the user to fill in.  The taxdump lineage resolution happens later
-    in ``apply --family-id``.
+    Rows are keyed by the identifier that actually appears as the tip's
+    species component in the downstream gene trees:
+
+    * Characterized genes (with or without a portal) → ``short_name`` from
+      ``characterized.tsv`` (this is the name init_family stamps into the
+      FASTA headers).  For those linked to a portal, ``ncbi_taxon_id`` is
+      pre-filled from the portal DB row.
+    * Portal species not shadowed by a characterized row → ``portal_id``
+      (ncbi_taxon_id pre-filled from the DB).
+
+    Keeping the key aligned with the tree tip label means every downstream
+    consumer can do a direct lookup with no redirect layer.
     """
     char_tsv = paths.family_characterized_dir(family_id) / "characterized.tsv"
     if not char_tsv.exists():
@@ -678,40 +685,48 @@ def _export_family_taxonomy(
         reader = csv.DictReader(fh, delimiter="\t")
         char_rows = list(reader)
 
-    # Collect unique species: portal species + standalone species
-    portal_species: dict[str, str] = {}  # portal_id -> species
-    standalone_species: dict[str, str] = {}  # short_name -> species
+    # Characterized rows keyed by short_name (how they appear in trees).
+    # Value: (species, portal_id)
+    char_species: dict[str, tuple[str, str]] = {}
+    portals_shadowed: set[str] = set()
     for row in char_rows:
-        portal_id = row.get("portal_id", "").strip()
-        species = row.get("species", "").strip()
-        short_name = row.get("short_name", "").strip()
+        short_name = (row.get("short_name") or "").strip()
+        if not short_name:
+            continue
+        species = (row.get("species") or "").strip()
+        portal_id = (row.get("portal_id") or "").strip()
+        char_species[short_name] = (species, portal_id)
         if portal_id:
-            portal_species[portal_id] = species
-        elif short_name:
-            standalone_species[short_name] = species
+            portals_shadowed.add(portal_id)
 
-    # Also include all portals that have selected FASTAs for this family
+    # Portal species present in the family's selected FASTAs but not shadowed
+    # by a characterized row — keep them keyed by portal_id.
+    portal_only: dict[str, str] = {}
     selected_dir = paths.family_selected_dir(family_id)
     if selected_dir.is_dir():
         for faa in selected_dir.glob("*.faa"):
             pid = faa.stem
-            if pid not in portal_species:
-                portal_species[pid] = ""
+            if pid not in portals_shadowed:
+                portal_only[pid] = ""
 
-    # Fetch ncbi_taxon_id for portal species from DB
-    conn = connect(paths.db_path)
-    try:
-        portal_tax: dict[str, int | None] = {}
-        for pid in portal_species:
-            row = conn.execute(
-                "SELECT ncbi_taxon_id, name FROM portals WHERE portal_id = ?", (pid,)
-            ).fetchone()
-            if row:
-                portal_tax[pid] = row["ncbi_taxon_id"]
-                if not portal_species[pid]:
-                    portal_species[pid] = row["name"] or ""
-    finally:
-        conn.close()
+    # Fetch ncbi_taxon_id + species name from DB for every portal we reference
+    # (both shadowed and portal-only).
+    all_portal_ids = portals_shadowed | set(portal_only)
+    portal_tax: dict[str, int | None] = {}
+    portal_names: dict[str, str] = {}
+    if all_portal_ids:
+        conn = connect(paths.db_path)
+        try:
+            for pid in all_portal_ids:
+                row = conn.execute(
+                    "SELECT ncbi_taxon_id, name FROM portals WHERE portal_id = ?",
+                    (pid,),
+                ).fetchone()
+                if row:
+                    portal_tax[pid] = row["ncbi_taxon_id"]
+                    portal_names[pid] = row["name"] or ""
+        finally:
+            conn.close()
 
     # Output path
     if out is None:
@@ -722,29 +737,45 @@ def _export_family_taxonomy(
         out = out.expanduser().resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    # Write template — same shape as species-dataset export
+    n_char_portal = 0
+    n_char_standalone = 0
     header = ["short_name", "species", "portal_id", "ncbi_taxon_id", "note"]
     with out.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f, delimiter="\t")
         w.writerow(header)
 
-        # Portal species (ncbi_taxon_id pre-filled from DB)
-        for pid in sorted(portal_species):
-            species = portal_species[pid]
-            tax_id = portal_tax.get(pid)
+        # Characterized rows (keyed by short_name).
+        for sn in sorted(char_species):
+            species, portal_id = char_species[sn]
+            tax_id: int | None = None
+            if portal_id:
+                n_char_portal += 1
+                tax_id = portal_tax.get(portal_id)
+                if not species:
+                    species = portal_names.get(portal_id, "")
+            else:
+                n_char_standalone += 1
             w.writerow([
-                pid, species, pid,
+                sn,
+                species,
+                portal_id,
                 "" if tax_id is None else str(tax_id),
                 "",
             ])
 
-        # Standalone species (user fills in ncbi_taxon_id)
-        for sn in sorted(standalone_species):
-            species = standalone_species[sn]
-            w.writerow([sn, species, "", "", ""])
+        # Portal-only species (not shadowed by any characterized row).
+        for pid in sorted(portal_only):
+            species = portal_names.get(pid, "")
+            tax_id = portal_tax.get(pid)
+            w.writerow([
+                pid,
+                species,
+                pid,
+                "" if tax_id is None else str(tax_id),
+                "",
+            ])
 
-    n_portal = len(portal_species)
-    n_standalone = len(standalone_species)
+    n_portal_only = len(portal_only)
     log_event(
         project_dir,
         {
@@ -752,13 +783,23 @@ def _export_family_taxonomy(
             "event": "taxonomy_export_family",
             "family_id": family_id,
             "out": str(out),
-            "n_portal": n_portal,
-            "n_standalone": n_standalone,
+            "n_char_portal": n_char_portal,
+            "n_char_standalone": n_char_standalone,
+            "n_portal_only": n_portal_only,
         },
     )
     typer.echo(f"Wrote family taxonomy template: {out}")
-    typer.echo(f"  Portal species:     {n_portal} (ncbi_taxon_id pre-filled from DB)")
-    typer.echo(f"  Standalone species:  {n_standalone} (fill in ncbi_taxon_id)")
+    typer.echo(
+        f"  Characterized (portal):     {n_char_portal} "
+        "(ncbi_taxon_id pre-filled from DB)"
+    )
+    typer.echo(
+        f"  Characterized (standalone): {n_char_standalone} (fill in ncbi_taxon_id)"
+    )
+    typer.echo(
+        f"  Portal-only species:        {n_portal_only} "
+        "(ncbi_taxon_id pre-filled from DB)"
+    )
 
 
 @app.command("apply")

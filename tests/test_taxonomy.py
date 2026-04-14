@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import io
 import json
 import sqlite3
@@ -454,31 +455,54 @@ def test_taxonomy_export_family_creates_template(tmp_path: Path) -> None:
     _insert_portal(paths, "PortalB", 5678)
 
     _seed_family_characterized(paths, "mfs_sugar", [
-        {"short_name": "PortalA", "species": "Aspergillus fumigatus", "portal_id": "PortalA"},
-        {"short_name": "PortalB", "species": "Aspergillus niger", "portal_id": "PortalB"},
+        # Portal-characterized gene: short_name ≠ portal_id (the realistic case)
+        {"short_name": "foo_a", "species": "Aspergillus fumigatus", "portal_id": "PortalA"},
+        {"short_name": "foo_b", "species": "Aspergillus niger", "portal_id": "PortalB"},
         {"short_name": "OutgroupX", "species": "Outgroup species", "portal_id": ""},
     ])
+    # Simulate a selected FASTA for a portal that is NOT shadowed by any
+    # characterized row — it should end up as a portal-only entry keyed by pid.
+    selected_dir = paths.family_selected_dir("mfs_sugar")
+    selected_dir.mkdir(parents=True, exist_ok=True)
+    (selected_dir / "PortalC.faa").write_text(">PortalC|p1\nM\n", encoding="utf-8")
+    _insert_portal(paths, "PortalC", 9012)
 
     result = runner.invoke(
         app,
         ["taxonomy", "export", "--family-id", "mfs_sugar", str(project_dir)],
     )
     assert result.exit_code == 0, result.output
-    assert "Portal species:     2" in result.output
-    assert "Standalone species:  1" in result.output
+    assert "Characterized (portal):     2" in result.output
+    assert "Characterized (standalone): 1" in result.output
+    assert "Portal-only species:        1" in result.output
 
     template = paths.family_config_dir("mfs_sugar") / "taxonomy_template.tsv"
     assert template.exists()
-    text = template.read_text(encoding="utf-8")
-    assert "short_name\tspecies\tportal_id\tncbi_taxon_id\tnote" in text
+    rows = list(csv.DictReader(template.open(encoding="utf-8"), delimiter="\t"))
+    by_sn = {r["short_name"]: r for r in rows}
+
+    # Characterized rows keyed by short_name, portal column still populated,
+    # ncbi_taxon_id pre-filled from the portal DB row.
+    assert by_sn["foo_a"]["portal_id"] == "PortalA"
+    assert by_sn["foo_a"]["ncbi_taxon_id"] == "1234"
+    assert by_sn["foo_b"]["portal_id"] == "PortalB"
+    assert by_sn["foo_b"]["ncbi_taxon_id"] == "5678"
+
+    # Standalone characterized: empty portal, empty taxon_id
+    assert by_sn["OutgroupX"]["portal_id"] == ""
+    assert by_sn["OutgroupX"]["ncbi_taxon_id"] == ""
+
+    # Portal-only species: keyed by portal_id, pre-filled
+    assert by_sn["PortalC"]["portal_id"] == "PortalC"
+    assert by_sn["PortalC"]["ncbi_taxon_id"] == "9012"
+
+    # The shadowed portals (PortalA, PortalB) must NOT appear as extra rows
+    # keyed by portal_id — taxonomy.tsv must have exactly one row per tip-species.
+    assert "PortalA" not in by_sn
+    assert "PortalB" not in by_sn
+
     # No rank columns in export — those are resolved by apply
-    assert "phylum" not in text
-    assert "PortalA" in text
-    assert "PortalB" in text
-    assert "OutgroupX" in text
-    # Portal species have ncbi_taxon_id pre-filled
-    assert "1234" in text
-    assert "5678" in text
+    assert "phylum" not in template.read_text(encoding="utf-8")
 
 
 def test_taxonomy_export_family_custom_output(tmp_path: Path) -> None:

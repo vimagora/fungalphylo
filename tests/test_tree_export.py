@@ -254,6 +254,84 @@ def test_tree_export_heatmap_unknown_group_errors(tmp_path: Path) -> None:
     assert "group_missing" in result.output
 
 
+def test_tree_export_quotes_underscored_tip_labels(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+
+    _seed_phylo_run(paths, "phylo_us", {
+        "OG0001": "((foo_a|prot_1:0.1,SpB|p2:0.2):0.3,(SpC|p3:0.3,SpD|p4:0.4):0.5);",
+    })
+
+    result = runner.invoke(
+        app,
+        [
+            "protsetphylo", "tree-export",
+            "--family-id", "us_fam",
+            "--run-id", "phylo_us",
+            str(project_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    nwk = (
+        paths.family_dir("us_fam") / "tree_export" / "itol" / "OG0001" / "tree.nwk"
+    ).read_text(encoding="utf-8")
+    assert "'foo_a|prot_1'" in nwk
+
+
+def test_tree_export_taxonomy_for_portal_characterized(tmp_path: Path) -> None:
+    """A portal-characterized gene enters the tree as ``{short_name}|...``.
+
+    Since the new family taxonomy export keys portal-characterized rows by
+    the characterized short_name (not the portal_id), a direct lookup
+    resolves their lineage.
+    """
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+
+    _seed_phylo_run(paths, "phylo_pc", {
+        "OG0001": "((foo_a|prot1:0.1,SpB|p2:0.2):0.3,(SpC|p3:0.3,SpD|p4:0.4):0.5);",
+    })
+
+    # foo_a is characterized AND linked to portal Aspnid1
+    _seed_characterized(paths, "pc_fam", [
+        {"short_name": "foo_a", "species": "Sp A", "portal_id": "Aspnid1", "group_function": "transporter"},
+    ])
+
+    # New taxonomy.tsv schema: characterized rows keyed by short_name,
+    # portal_id column retained for traceability.
+    _seed_taxonomy(paths, "pc_fam", [
+        {"short_name": "foo_a", "species": "Sp A", "portal_id": "Aspnid1", "order": "Eurotiales", "family": "Aspergillaceae"},
+        {"short_name": "SpB", "species": "Sp B", "portal_id": "SpB", "order": "Hypocreales", "family": "Nectriaceae"},
+        {"short_name": "SpC", "species": "Sp C", "portal_id": "SpC", "order": "Hypocreales", "family": "Nectriaceae"},
+        {"short_name": "SpD", "species": "Sp D", "portal_id": "SpD", "order": "Hypocreales", "family": "Nectriaceae"},
+    ])
+
+    result = runner.invoke(
+        app,
+        [
+            "protsetphylo", "tree-export",
+            "--family-id", "pc_fam",
+            "--run-id", "phylo_pc",
+            "--tax-level", "order",
+            str(project_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    og_dir = paths.family_dir("pc_fam") / "tree_export" / "itol" / "OG0001"
+    order_txt = (og_dir / "dataset_tax_order.txt").read_text(encoding="utf-8")
+    # Annotation-file IDs are unquoted (iTOL matches the post-parse label).
+    assert "foo_a|prot1\t" in order_txt
+    # The portal-characterized tip must resolve taxonomy via Aspnid1's lineage.
+    foo_line = next(line for line in order_txt.splitlines() if line.startswith("foo_a|prot1\t"))
+    assert "Eurotiales" in foo_line
+
+    # The newick itself must quote the underscored tip so iTOL preserves the "_".
+    nwk = (og_dir / "tree.nwk").read_text(encoding="utf-8")
+    assert "'foo_a|prot1'" in nwk
+
+
 def test_tree_export_auto_detects_latest_run(tmp_path: Path) -> None:
     project_dir = tmp_path / "project"
     paths = _init_project(project_dir)

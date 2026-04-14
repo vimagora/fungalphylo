@@ -262,7 +262,11 @@ def clade_mark_command(
             n_skipped += 1
             continue
         try:
-            tree = dendropy.Tree.get(path=str(nwk_path), schema="newick")
+            tree = dendropy.Tree.get(
+                path=str(nwk_path),
+                schema="newick",
+                preserve_underscores=True,
+            )
         except Exception as e:
             typer.echo(f"  SKIP {og_id}: {e}")
             n_skipped += 1
