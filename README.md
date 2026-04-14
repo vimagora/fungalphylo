@@ -596,46 +596,52 @@ fungalphylo taxonomy apply --family-id mfs_sugar --dry-run /path/to/project \
 
 The apply step reads `ncbi_taxon_id` values, resolves lineages from the NCBI taxdump (run `taxonomy fetch-ncbi` first), and writes `families/<family_id>/config/taxonomy.tsv` with rank columns. This file is used by `tree-export` for color bars.
 
-#### 10. Visualize gene trees with `tree-export`
+#### 10. Generate iTOL annotations with `tree-export`
 
-Render gene trees as annotated PDF/SVG with node numbers, taxonomy color bars, group annotations, and characterized-gene landmarks:
+Produce iTOL-ready annotation files for each gene tree. `tree-export` numbers the internal nodes, writes one folder per OG under `tree_export/itol/<OG>/`, and emits dataset files you drag onto the tree page at [itol.embl.de](https://itol.embl.de/). iTOL handles the actual rendering, legends, and export to PDF/SVG/PNG.
 
 ```bash
 # Basic export (auto-detect latest phylo run)
 fungalphylo protsetphylo tree-export \
   --family-id mfs_sugar /path/to/project
 
-# With taxonomy color bars (repeatable --tax-level)
+# Taxonomy color strips (repeatable --tax-level)
 fungalphylo protsetphylo tree-export \
   --family-id mfs_sugar \
   --tax-level order --tax-level family \
   /path/to/project
 
-# From a specific phylo run
+# User-selected group_* columns as color strip and/or heatmap
 fungalphylo protsetphylo tree-export \
-  --family-id mfs_sugar --run-id <phylo_run_id> \
+  --family-id mfs_sugar \
+  --color-bar group_function \
+  --heatmap group_substrate \
   /path/to/project
 ```
 
 **What it does**:
-- Numbers internal nodes: IQ-TREE output `95/88` (UFBoot/SH-aLRT) becomes `95/88/N4` (appends node index)
-- Renders each OG tree as PDF + SVG with toytree/toyplot
-- Taxonomy color bars: one bar per `--tax-level` (e.g., order, family)
-- `group_*` columns from characterized.tsv: single-value → color bars, multi-value (semicolons) → heatmaps
-- Characterized gene tips highlighted in red
-- Writes numbered Newick files for downstream `clade-mark`
+- Numbers internal nodes: IQ-TREE output `95/88` (UFBoot/SH-aLRT) becomes `95/88/N4` (appends preorder node index)
+- Writes one numbered Newick per OG under `numbered_newick/<OG>.nwk` (used by `clade-mark`)
+- Writes one iTOL folder per OG under `itol/<OG>/` containing `tree.nwk` and `dataset_*.txt` annotation files
+- `--tax-level <rank>`: `DATASET_COLORSTRIP` per rank (colors are stable across OGs)
+- `--color-bar group_X`: single color strip from a `group_*` column in `characterized.tsv`
+- `--heatmap group_X`: `DATASET_BINARY` where each atomic value (split on `;`) becomes a column with on/off marks per tip — useful for multi-value fields like substrate specificity
+- Characterized-gene tips are marked with a star via `dataset_landmarks.txt` (`DATASET_SYMBOL`)
+- `iTOL_UPLOAD.md` at the top of `tree_export/` has the upload steps
 
 Output in `families/<family_id>/tree_export/`:
-- `trees/<OG_ID>.pdf` / `trees/svg/<OG_ID>.svg` — Rendered trees
-- `numbered_newick/<OG_ID>.nwk` — Trees with node numbers in internal labels
+- `itol/<OG>/tree.nwk` — Numbered tree to upload
+- `itol/<OG>/dataset_*.txt` — Drag onto the loaded tree in iTOL
+- `numbered_newick/<OG>.nwk` — Same numbered trees for downstream `clade-mark`
+- `iTOL_UPLOAD.md` — Step-by-step upload and export instructions
 
 #### 11. Mark clades with `clade-mark`
 
-After reviewing the numbered trees, identify clades of interest and build a species × clade gene count matrix:
+After reviewing the numbered trees in iTOL, identify clades of interest and build a species × clade gene count matrix:
 
 ```bash
 # Create a TSV with columns: clade_name, og_id, node_number
-# (node_number from the numbered newick / rendered tree)
+# (node_number read from the internal labels in iTOL, e.g. N42)
 
 fungalphylo protsetphylo clade-mark \
   --family-id mfs_sugar \
@@ -652,15 +658,15 @@ hexose_clade	OG0000005	23
 ```
 
 **What it does**:
-- For each entry, finds node N42 (etc.) in the numbered Newick, collects all descendant tips
-- Builds a species × clade gene count matrix (how many genes per species per clade)
-- Re-renders trees with clade highlights (colored subtrees)
-- Generates an iTOL `DATASET_HEATMAP` annotation file for the species tree
+- For each entry, finds node `N<n>` in the numbered Newick and collects all descendant tips
+- Builds a species × clade gene count matrix
+- Writes one `DATASET_COLORSTRIP` per OG highlighting the clade membership of each tip (upload alongside the gene tree in iTOL)
+- Writes a species-tree `DATASET_HEATMAP` of the count matrix (upload on your species tree)
 
 Output in `families/<family_id>/clade_mark/`:
 - `clade_count_matrix.tsv` — Species × clade gene count matrix
-- `itol_clade_heatmap.txt` — iTOL annotation file (upload to species tree)
-- `trees/<OG_ID>.pdf` / `trees/svg/<OG_ID>.svg` — Trees with highlighted clades
+- `itol/<OG>/dataset_clades.txt` — Per-OG clade color strip for iTOL
+- `itol_species_clade_heatmap.txt` — Species-tree heatmap for iTOL
 
 ### Family directory structure
 
@@ -688,14 +694,15 @@ families/<family_id>/
     merge_<OG_ID>.fa           # Merged OG groups
   place_standalone/            # HMM placement working directory
     placements.tsv             # Placement report (read by og-report)
-  tree_export/                 # Rendered gene trees (from tree-export)
-    trees/<OG_ID>.pdf          # Per-OG PDFs with annotations
-    trees/svg/<OG_ID>.svg      # Per-OG SVGs
+  tree_export/                 # iTOL annotation files (from tree-export)
+    itol/<OG_ID>/tree.nwk      # Per-OG numbered tree to upload
+    itol/<OG_ID>/dataset_*.txt # Per-OG iTOL annotation datasets
     numbered_newick/<OG_ID>.nwk # Trees with N-numbered internal nodes
+    iTOL_UPLOAD.md             # Upload/export instructions
   clade_mark/                  # Clade analysis (from clade-mark)
     clade_count_matrix.tsv     # Species × clade gene count matrix
-    itol_clade_heatmap.txt     # iTOL annotation for species tree
-    trees/<OG_ID>.pdf          # Trees with highlighted clades
+    itol/<OG_ID>/dataset_clades.txt  # Per-OG clade color strip
+    itol_species_clade_heatmap.txt   # Species-tree heatmap
   manifest.json
 ```
 

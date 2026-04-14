@@ -3,11 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import dendropy
 from typer.testing import CliRunner
 
 from fungalphylo.cli.commands.protsetphylo.tree_export import (
-    _load_characterized,
-    _load_taxonomy,
     _number_internal_nodes,
     _tip_to_species,
 )
@@ -79,28 +78,27 @@ def test_tip_to_species() -> None:
     assert _tip_to_species("nopipe") == "nopipe"
 
 
-def test_number_internal_nodes() -> None:
-    import toytree
-
-    t = toytree.tree("((A:0.1,B:0.2)95/88:0.3,(C:0.3,D:0.4)100/99:0.5);")
-    t = _number_internal_nodes(t)
-    internal_names = [n.name for n in t.traverse() if not n.is_leaf()]
-    # Each internal node should have /N<idx> appended
-    assert any("/N" in name for name in internal_names if name)
-    # Root node (no existing label) should be just N<idx>
-    root_name = t.treenode.name
-    assert root_name.startswith("N")
+def test_number_internal_nodes_preserves_support() -> None:
+    t = dendropy.Tree.get(
+        data="((A:0.1,B:0.2)95/88:0.3,(C:0.3,D:0.4)100/99:0.5);",
+        schema="newick",
+    )
+    _number_internal_nodes(t)
+    labels = [
+        n.label for n in t.preorder_internal_node_iter() if n.label
+    ]
+    assert any("/N" in lbl for lbl in labels)
+    assert any(lbl.startswith("95/88/N") for lbl in labels)
 
 
 def test_number_internal_nodes_no_support() -> None:
-    import toytree
-
-    t = toytree.tree("((A:0.1,B:0.2):0.3,(C:0.3,D:0.4):0.5);")
-    t = _number_internal_nodes(t)
-    internal_names = [n.name for n in t.traverse() if not n.is_leaf()]
-    # All should be just N<idx>
-    for name in internal_names:
-        assert name.startswith("N"), f"Expected N-prefixed name, got {name!r}"
+    t = dendropy.Tree.get(
+        data="((A:0.1,B:0.2):0.3,(C:0.3,D:0.4):0.5);",
+        schema="newick",
+    )
+    _number_internal_nodes(t)
+    for node in t.preorder_internal_node_iter():
+        assert node.label and node.label.startswith("N")
 
 
 # --- Integration tests ---
@@ -125,23 +123,19 @@ def test_tree_export_renders_trees(tmp_path: Path) -> None:
         ],
     )
     assert result.exit_code == 0, result.output
-    assert "Rendered 2 trees" in result.output
+    assert "Rendered iTOL datasets for 2 OGs" in result.output
 
     out_dir = paths.family_dir("test_fam") / "tree_export"
-    # Check numbered newick files
     assert (out_dir / "numbered_newick" / "OG0001.nwk").exists()
     assert (out_dir / "numbered_newick" / "OG0002.nwk").exists()
 
-    # Check that numbered newick contains N-numbers
     nwk = (out_dir / "numbered_newick" / "OG0001.nwk").read_text(encoding="utf-8")
-    assert "/N" in nwk or "N" in nwk
+    assert "N0" in nwk
 
-    # Check PDFs
-    assert (out_dir / "trees" / "OG0001.pdf").exists()
-    assert (out_dir / "trees" / "OG0002.pdf").exists()
-
-    # Check SVGs
-    assert (out_dir / "trees" / "svg" / "OG0001.svg").exists()
+    # iTOL per-OG tree.nwk
+    assert (out_dir / "itol" / "OG0001" / "tree.nwk").exists()
+    assert (out_dir / "itol" / "OG0002" / "tree.nwk").exists()
+    assert (out_dir / "iTOL_UPLOAD.md").exists()
 
 
 def test_tree_export_with_taxonomy(tmp_path: Path) -> None:
@@ -171,10 +165,17 @@ def test_tree_export_with_taxonomy(tmp_path: Path) -> None:
         ],
     )
     assert result.exit_code == 0, result.output
-    assert "Tax levels:       order, family" in result.output
+    assert "order, family" in result.output
+
+    itol_og = paths.family_dir("tax_fam") / "tree_export" / "itol" / "OG0001"
+    assert (itol_og / "dataset_tax_order.txt").exists()
+    assert (itol_og / "dataset_tax_family.txt").exists()
+    order_text = (itol_og / "dataset_tax_order.txt").read_text(encoding="utf-8")
+    assert "DATASET_COLORSTRIP" in order_text
+    assert "Eurotiales" in order_text
 
 
-def test_tree_export_with_characterized(tmp_path: Path) -> None:
+def test_tree_export_with_characterized_and_groups(tmp_path: Path) -> None:
     project_dir = tmp_path / "project"
     paths = _init_project(project_dir)
 
@@ -183,8 +184,14 @@ def test_tree_export_with_characterized(tmp_path: Path) -> None:
     })
 
     _seed_characterized(paths, "char_fam", [
-        {"short_name": "SpA", "species": "Sp A", "portal_id": "SpA", "group_function": "transporter"},
-        {"short_name": "SpC", "species": "Sp C", "portal_id": "", "group_function": "enzyme"},
+        {
+            "short_name": "SpA", "species": "Sp A", "portal_id": "SpA",
+            "group_function": "transporter", "group_substrate": "glucose;xylose",
+        },
+        {
+            "short_name": "SpC", "species": "Sp C", "portal_id": "",
+            "group_function": "enzyme", "group_substrate": "hexoses",
+        },
     ])
 
     result = runner.invoke(
@@ -193,11 +200,58 @@ def test_tree_export_with_characterized(tmp_path: Path) -> None:
             "protsetphylo", "tree-export",
             "--family-id", "char_fam",
             "--run-id", "phylo_char",
+            "--color-bar", "group_function",
+            "--heatmap", "group_substrate",
             str(project_dir),
         ],
     )
     assert result.exit_code == 0, result.output
-    assert "Rendered 1 trees" in result.output
+    assert "Rendered iTOL datasets for 1 OGs" in result.output
+
+    itol_og = paths.family_dir("char_fam") / "tree_export" / "itol" / "OG0001"
+    cb_path = itol_og / "dataset_colorbar_group_function.txt"
+    hm_path = itol_og / "dataset_heatmap_group_substrate.txt"
+    landmarks_path = itol_og / "dataset_landmarks.txt"
+    assert cb_path.exists()
+    assert hm_path.exists()
+    assert landmarks_path.exists()
+
+    cb_text = cb_path.read_text(encoding="utf-8")
+    assert "DATASET_COLORSTRIP" in cb_text
+    assert "transporter" in cb_text
+    assert "enzyme" in cb_text
+
+    hm_text = hm_path.read_text(encoding="utf-8")
+    assert "DATASET_BINARY" in hm_text
+    # atomic values should appear as field labels
+    assert "glucose" in hm_text
+    assert "xylose" in hm_text
+    assert "hexoses" in hm_text
+
+
+def test_tree_export_heatmap_unknown_group_errors(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    paths = _init_project(project_dir)
+
+    _seed_phylo_run(paths, "phylo_bad", {
+        "OG0001": "((SpA|p1:0.1,SpB|p2:0.2):0.3,(SpC|p3:0.3,SpD|p4:0.4):0.5);",
+    })
+    _seed_characterized(paths, "bad_fam", [
+        {"short_name": "SpA", "species": "Sp A", "portal_id": "SpA", "group_function": "x"},
+    ])
+
+    result = runner.invoke(
+        app,
+        [
+            "protsetphylo", "tree-export",
+            "--family-id", "bad_fam",
+            "--run-id", "phylo_bad",
+            "--heatmap", "group_missing",
+            str(project_dir),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "group_missing" in result.output
 
 
 def test_tree_export_auto_detects_latest_run(tmp_path: Path) -> None:

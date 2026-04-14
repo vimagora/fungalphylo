@@ -1,8 +1,10 @@
-"""protsetphylo tree-export — render gene trees as annotated PDF/SVG.
+"""protsetphylo tree-export — generate iTOL annotation files for gene trees.
 
-Reads IQ-TREE gene tree files from a phylo run, numbers internal nodes,
-and renders a multi-page PDF with optional taxonomy color bars, group
-annotations, and characterized-gene landmarks.
+Reads IQ-TREE gene tree files from a phylo run, numbers internal nodes (so
+clades can be referenced by ``N<idx>``), and emits iTOL-compatible annotation
+files for taxonomy, user-specified group columns, and characterized-gene
+landmarks. Users upload the numbered newick + dataset files to iTOL to
+explore, identify clades, and export rendered figures.
 """
 from __future__ import annotations
 
@@ -11,10 +13,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
-import toyplot
-import toyplot.pdf
-import toyplot.svg
-import toytree
+import dendropy
 import typer
 
 from fungalphylo.core.events import log_event
@@ -23,7 +22,7 @@ from fungalphylo.core.paths import ProjectPaths, ensure_project_dirs
 from fungalphylo.db.db import init_db
 
 # ---------------------------------------------------------------------------
-# Palette for taxonomy / group color bars
+# Palette for global color assignment (qualitative, high contrast)
 # ---------------------------------------------------------------------------
 _PALETTE = [
     "#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231",
@@ -32,15 +31,17 @@ _PALETTE = [
     "#aaffc3", "#808000", "#ffd8b1", "#000075", "#a9a9a9",
 ]
 
+CHARACTERIZED_COLOR = "#e6194b"
+
 
 def _color_map(values: list[str]) -> dict[str, str]:
-    """Map unique non-empty string values to palette colors."""
+    """Assign a palette color to each unique non-empty value (sorted)."""
     unique = sorted({v for v in values if v})
     return {v: _PALETTE[i % len(_PALETTE)] for i, v in enumerate(unique)}
 
 
 # ---------------------------------------------------------------------------
-# Tree helpers
+# Tree I/O (dendropy)
 # ---------------------------------------------------------------------------
 
 def _find_gene_trees_dir(paths: ProjectPaths, run_id: str | None) -> tuple[Path, str]:
@@ -51,8 +52,7 @@ def _find_gene_trees_dir(paths: ProjectPaths, run_id: str | None) -> tuple[Path,
             raise typer.BadParameter(f"No gene_trees directory in run {run_id}")
         return gt_dir, run_id
 
-    # Auto-detect latest family_phylo run
-    candidates = []
+    candidates: list[tuple[str, str]] = []
     for manifest_path in paths.runs_root.glob("*/manifest.json"):
         try:
             data = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -68,33 +68,51 @@ def _find_gene_trees_dir(paths: ProjectPaths, run_id: str | None) -> tuple[Path,
     return paths.run_dir(resolved) / "gene_trees", resolved
 
 
-def _load_tree(newick_path: Path) -> toytree.ToyTree:
-    """Load a newick file, stripping empty lines."""
+def _load_tree(newick_path: Path) -> dendropy.Tree:
     text = newick_path.read_text(encoding="utf-8").strip()
     if not text:
         raise ValueError(f"Empty tree file: {newick_path}")
-    return toytree.tree(text)
+    return dendropy.Tree.get(data=text, schema="newick")
 
 
-def _number_internal_nodes(tree: toytree.ToyTree) -> toytree.ToyTree:
-    """Append /N<idx> to internal node names (preserving UFBoot/SH-aLRT).
+def _number_internal_nodes(tree: dendropy.Tree) -> dendropy.Tree:
+    """Append ``/N<idx>`` to internal node labels (idx assigned in preorder).
 
-    IQ-TREE produces internal node names like '95/88' (UFBoot/SH-aLRT).
-    This function appends the node index: '95/88/N4'.
+    IQ-TREE outputs internal labels like ``95/88`` (UFBoot/SH-aLRT). After this
+    function, the same label becomes ``95/88/N42``. Unlabeled internals become
+    just ``N42``. Leaves are untouched.
     """
-    for node in tree.traverse():
-        if not node.is_leaf():
-            existing = node.name or ""
-            if existing:
-                node.name = f"{existing}/N{node.idx}"
-            else:
-                node.name = f"N{node.idx}"
+    counter = 0
+    for node in tree.preorder_internal_node_iter():
+        existing = (node.label or "").strip()
+        if existing:
+            node.label = f"{existing}/N{counter}"
+        else:
+            node.label = f"N{counter}"
+        counter += 1
     return tree
 
 
-def _write_numbered_newick(tree: toytree.ToyTree, out_path: Path) -> None:
-    """Write tree with numbered internal nodes to newick file."""
-    out_path.write_text(tree.write(internal_labels="name") + "\n", encoding="utf-8")
+def _write_numbered_newick(tree: dendropy.Tree, out_path: Path) -> None:
+    """Write tree with numbered internal labels to a newick file."""
+    text = tree.as_string(
+        schema="newick",
+        suppress_internal_node_labels=False,
+        unquoted_underscores=True,
+    ).strip()
+    # Dendropy may prefix with "[&R]" or similar — strip any leading metadata.
+    if text.startswith("[") and "]" in text:
+        text = text.split("]", 1)[1].strip()
+    out_path.write_text(text + "\n", encoding="utf-8")
+
+
+def _tree_tip_labels(tree: dendropy.Tree) -> list[str]:
+    return [leaf.taxon.label for leaf in tree.leaf_node_iter() if leaf.taxon]
+
+
+def _tip_to_species(tip_label: str, delimiter: str = "|") -> str:
+    """Extract species/short_name from ``'PortalA|proteinID'``."""
+    return tip_label.split(delimiter, 1)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +120,7 @@ def _write_numbered_newick(tree: toytree.ToyTree, out_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def _load_taxonomy(paths: ProjectPaths, family_id: str) -> dict[str, dict[str, str]]:
-    """Load taxonomy TSV for a family. Returns {short_name: {rank: value}}."""
+    """Load resolved taxonomy TSV. Returns {short_name: {rank: value}}."""
     tax_path = paths.family_config_dir(family_id) / "taxonomy.tsv"
     if not tax_path.exists():
         return {}
@@ -110,246 +128,328 @@ def _load_taxonomy(paths: ProjectPaths, family_id: str) -> dict[str, dict[str, s
     with tax_path.open(encoding="utf-8") as fh:
         reader = csv.DictReader(fh, delimiter="\t")
         for row in reader:
-            sn = row.get("short_name", "").strip()
+            sn = (row.get("short_name") or "").strip()
             if sn:
-                result[sn] = {k: v.strip() for k, v in row.items() if k != "short_name"}
+                result[sn] = {k: (v or "").strip() for k, v in row.items() if k != "short_name"}
     return result
 
 
-def _load_characterized(paths: ProjectPaths, family_id: str) -> dict[str, dict]:
-    """Load characterized.tsv. Returns {protein_header: row_dict}.
-
-    Protein headers in the tree are like 'PortalA|proteinID' or 'short_name|proteinID'.
-    The characterized.tsv maps short_name to the species info and group columns.
-    """
+def _load_characterized(paths: ProjectPaths, family_id: str) -> dict[str, dict[str, str]]:
+    """Load characterized.tsv. Returns {short_name: row_dict}."""
     char_path = paths.family_characterized_dir(family_id) / "characterized.tsv"
     if not char_path.exists():
         return {}
-    result: dict[str, dict] = {}
+    result: dict[str, dict[str, str]] = {}
     with char_path.open(encoding="utf-8") as fh:
         reader = csv.DictReader(fh, delimiter="\t")
         for row in reader:
-            sn = row.get("short_name", "").strip()
+            sn = (row.get("short_name") or "").strip()
             if sn:
-                result[sn] = dict(row)
+                result[sn] = {k: (v or "") for k, v in row.items()}
     return result
 
 
-def _tip_to_species(tip_label: str, delimiter: str = "|") -> str:
-    """Extract species/short_name from a tree tip label like 'PortalA|proteinID'."""
-    return tip_label.split(delimiter, 1)[0]
-
-
-# ---------------------------------------------------------------------------
-# Rendering
-# ---------------------------------------------------------------------------
-
-def _render_tree_page(
-    tree: toytree.ToyTree,
-    og_name: str,
-    taxonomy: dict[str, dict[str, str]],
-    characterized: dict[str, dict],
-    tax_levels: list[str],
-    delimiter: str,
-    width: int,
-    height_per_tip: int,
-) -> toyplot.canvas.Canvas:
-    """Render a single gene tree with annotations."""
-    ntips = tree.ntips
-    height = max(300, ntips * height_per_tip)
-
-    # Extra width for color bars
-    n_bars = len(tax_levels)
-    # Count group columns
-    group_cols = _get_group_columns(characterized)
-    n_bars += len(group_cols)
-    bar_width = 20
-    extra_width = n_bars * (bar_width + 5) + 60  # padding
-    total_width = width + extra_width
-
-    tip_labels = tree.get_tip_labels()
-
-    # Build node labels: internal nodes get their numbered name, tips stay empty
-    node_labels = []
-    for node in tree.traverse():
-        if node.is_leaf():
-            node_labels.append("")
-        else:
-            node_labels.append(node.name or "")
-
-    # Characterized gene landmarks: mark tip with a star
-    char_tips = set()
-    for tip in tip_labels:
-        sp = _tip_to_species(tip, delimiter)
-        if sp in characterized:
-            char_tips.add(tip)
-
-    # Tip label colors: characterized genes in red
-    tip_colors = []
-    for tip in tip_labels:
-        if tip in char_tips:
-            tip_colors.append("#e6194b")
-        else:
-            tip_colors.append("#333333")
-
-    canvas, axes, mark = tree.draw(
-        width=total_width,
-        height=height,
-        tip_labels_align=True,
-        tip_labels_style={
-            "font-size": "9px",
-            "-toyplot-anchor-shift": f"{extra_width}px",
-        },
-        tip_labels_colors=tip_colors,
-        node_labels=node_labels,
-        node_labels_style={"font-size": "7px", "fill": "#666"},
-        node_sizes=0,
-    )
-
-    # Add OG name as title text on the canvas
-    canvas.text(
-        total_width / 2, 12, og_name,
-        style={"font-size": "12px", "font-weight": "bold", "text-anchor": "middle"},
-    )
-
-    # Add color bars to the right of tips
-    # Use tree height to position bars just past tip labels
-    tree_height = tree.treenode.height or 1.0
-    bar_x_start = tree_height * 1.08
-    bar_x_step = tree_height * 0.05
-
-    col_idx = 0
-
-    # Taxonomy color bars
-    for rank in tax_levels:
-        values = []
-        for tip in tip_labels:
-            sp = _tip_to_species(tip, delimiter)
-            tax = taxonomy.get(sp, {})
-            values.append(tax.get(rank, ""))
-
-        cmap = _color_map(values)
-        x_left = bar_x_start + col_idx * bar_x_step
-        x_right = x_left + bar_x_step * 0.7
-
-        for i, val in enumerate(values):
-            color = cmap.get(val, "#f0f0f0")
-            axes.rectangle(
-                x_left, x_right,
-                i - 0.4, i + 0.4,
-                style={"fill": color, "stroke": "none"},
-            )
-
-        # Label at top
-        axes.text(
-            (x_left + x_right) / 2, ntips - 0.2,
-            rank[:3].upper(),
-            style={"font-size": "7px", "text-anchor": "middle", "fill": "#666"},
-        )
-        col_idx += 1
-
-    # Group columns
-    for gcol, is_multi in group_cols:
-        display_name = gcol.replace("group_", "")
-        if is_multi:
-            # Multi-value heatmap: intensity by count of semicolons
-            values = []
-            for tip in tip_labels:
-                sp = _tip_to_species(tip, delimiter)
-                char = characterized.get(sp, {})
-                raw = char.get(gcol, "").strip()
-                if raw:
-                    values.append(len(raw.split(";")))
-                else:
-                    values.append(0)
-
-            max_val = max(values) if values and max(values) > 0 else 1
-            x_left = bar_x_start + col_idx * bar_x_step
-            x_right = x_left + bar_x_step * 0.7
-
-            for i, count in enumerate(values):
-                intensity = count / max_val if count > 0 else 0
-                r = int(255 * (1 - intensity))
-                color = f"rgb({r}, {r}, 255)"
-                axes.rectangle(
-                    x_left, x_right,
-                    i - 0.4, i + 0.4,
-                    style={"fill": color, "stroke": "none"},
-                )
-
-            axes.text(
-                (x_left + x_right) / 2, ntips - 0.2,
-                display_name[:4].upper(),
-                style={"font-size": "7px", "text-anchor": "middle", "fill": "#666"},
-            )
-        else:
-            # Single-value: color bar
-            values = []
-            for tip in tip_labels:
-                sp = _tip_to_species(tip, delimiter)
-                char = characterized.get(sp, {})
-                values.append(char.get(gcol, "").strip())
-
-            cmap = _color_map(values)
-            x_left = bar_x_start + col_idx * bar_x_step
-            x_right = x_left + bar_x_step * 0.7
-
-            for i, val in enumerate(values):
-                color = cmap.get(val, "#f0f0f0")
-                axes.rectangle(
-                    x_left, x_right,
-                    i - 0.4, i + 0.4,
-                    style={"fill": color, "stroke": "none"},
-                )
-
-            axes.text(
-                (x_left + x_right) / 2, ntips - 0.2,
-                display_name[:4].upper(),
-                style={"font-size": "7px", "text-anchor": "middle", "fill": "#666"},
-            )
-        col_idx += 1
-
-    return canvas
-
-
-def _get_group_columns(characterized: dict[str, dict]) -> list[tuple[str, bool]]:
-    """Identify group_* columns and whether they are multi-value (semicolons).
-
-    Returns [(col_name, is_multi), ...].
-    """
+def _available_group_columns(characterized: dict[str, dict[str, str]]) -> list[str]:
     if not characterized:
         return []
     sample = next(iter(characterized.values()))
-    group_cols = sorted(k for k in sample if k.startswith("group_"))
-    result = []
-    for gcol in group_cols:
-        has_semi = any(";" in row.get(gcol, "") for row in characterized.values())
-        result.append((gcol, has_semi))
+    return sorted(k for k in sample if k.startswith("group_"))
+
+
+def _validate_groups(
+    selected: list[str], available: list[str], flag_name: str
+) -> None:
+    """Raise BadParameter if any selected group is not present in characterized.tsv."""
+    missing = [g for g in selected if g not in available]
+    if missing:
+        avail_str = ", ".join(available) if available else "(none)"
+        raise typer.BadParameter(
+            f"{flag_name} columns not found in characterized.tsv: {', '.join(missing)}\n"
+            f"Available group_* columns: {avail_str}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Global color assignment (one palette, computed once per run)
+# ---------------------------------------------------------------------------
+
+def _compute_global_colors(
+    characterized: dict[str, dict[str, str]],
+    taxonomy: dict[str, dict[str, str]],
+    tax_levels: list[str],
+    color_bar_groups: list[str],
+    heatmap_groups: list[str],
+) -> dict:
+    """Assign global colors to annotation tracks so every OG uses the same mapping.
+
+    Returns::
+
+        {
+          "tax": {rank: {value: color}},
+          "color_bar": {group: {value: color}},
+          "heatmap": {group: {"color": str, "fields": [atomic values]}},
+        }
+    """
+    result: dict = {"tax": {}, "color_bar": {}, "heatmap": {}}
+
+    for rank in tax_levels:
+        values = [tax.get(rank, "") for tax in taxonomy.values()]
+        result["tax"][rank] = _color_map(values)
+
+    for gcol in color_bar_groups:
+        values = [(row.get(gcol) or "").strip() for row in characterized.values()]
+        result["color_bar"][gcol] = _color_map(values)
+
+    # Heatmap groups: one color per group, N atomic-value fields
+    n_prior = len(tax_levels) + len(color_bar_groups)
+    for i, gcol in enumerate(heatmap_groups):
+        atomic: set[str] = set()
+        for row in characterized.values():
+            raw = (row.get(gcol) or "").strip()
+            if not raw:
+                continue
+            for part in raw.split(";"):
+                p = part.strip()
+                if p:
+                    atomic.add(p)
+        color = _PALETTE[(n_prior + i) % len(_PALETTE)]
+        result["heatmap"][gcol] = {
+            "color": color,
+            "fields": sorted(atomic),
+        }
+
     return result
 
 
 # ---------------------------------------------------------------------------
-# Output helpers
+# iTOL dataset writers
 # ---------------------------------------------------------------------------
 
-def _write_individual_pdfs(
-    canvases: list[tuple[str, toyplot.canvas.Canvas]], out_path: Path
+def _write_colorstrip(
+    out_path: Path,
+    label: str,
+    tip_values: dict[str, str],
+    color_map: dict[str, str],
 ) -> None:
-    """Write each canvas as a separate PDF file in a directory."""
-    out_dir = out_path.parent / out_path.stem
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for og_name, tp_canvas in canvases:
-        pdf_path = out_dir / f"{og_name}.pdf"
-        with pdf_path.open("wb") as f:
-            toyplot.pdf.render(tp_canvas, f)
+    """Write a DATASET_COLORSTRIP file keyed by tip label."""
+    legend_values = sorted({v for v in tip_values.values() if v})
+    lines = [
+        "DATASET_COLORSTRIP",
+        "SEPARATOR TAB",
+        f"DATASET_LABEL\t{label}",
+        f"COLOR\t{color_map.get(legend_values[0], '#aaaaaa') if legend_values else '#aaaaaa'}",
+        "STRIP_WIDTH\t25",
+        "MARGIN\t2",
+        "BORDER_WIDTH\t0",
+        "COLOR_BRANCHES\t0",
+        f"LEGEND_TITLE\t{label}",
+    ]
+    if legend_values:
+        lines.append("LEGEND_SHAPES\t" + "\t".join("1" for _ in legend_values))
+        lines.append(
+            "LEGEND_COLORS\t"
+            + "\t".join(color_map.get(v, "#cccccc") for v in legend_values)
+        )
+        lines.append("LEGEND_LABELS\t" + "\t".join(legend_values))
+    lines.append("DATA")
+    for tip in sorted(tip_values):
+        value = tip_values[tip]
+        if not value:
+            continue
+        color = color_map.get(value, "#cccccc")
+        lines.append(f"{tip}\t{color}\t{value}")
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    # Also write SVGs
-    svg_dir = out_dir / "svg"
-    svg_dir.mkdir(parents=True, exist_ok=True)
-    for og_name, tp_canvas in canvases:
-        svg_path = svg_dir / f"{og_name}.svg"
-        with svg_path.open("wb") as f:
-            toyplot.svg.render(tp_canvas, f)
+
+def _write_binary(
+    out_path: Path,
+    label: str,
+    field_labels: list[str],
+    tip_sets: dict[str, set[str]],
+    group_color: str,
+) -> None:
+    """Write a DATASET_BINARY file (heatmap as on/off per atomic value)."""
+    lines = [
+        "DATASET_BINARY",
+        "SEPARATOR TAB",
+        f"DATASET_LABEL\t{label}",
+        f"COLOR\t{group_color}",
+        "FIELD_SHAPES\t" + "\t".join("1" for _ in field_labels),
+        "FIELD_LABELS\t" + "\t".join(field_labels),
+        "FIELD_COLORS\t" + "\t".join(group_color for _ in field_labels),
+        "SHOW_LABELS\t1",
+        "SYMBOL_SPACING\t10",
+        f"LEGEND_TITLE\t{label}",
+        "LEGEND_SHAPES\t1",
+        f"LEGEND_COLORS\t{group_color}",
+        f"LEGEND_LABELS\t{label} (present)",
+        "DATA",
+    ]
+    for tip in sorted(tip_sets):
+        values = tip_sets[tip]
+        row = ["1" if fl in values else "0" for fl in field_labels]
+        lines.append(f"{tip}\t" + "\t".join(row))
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_symbol(
+    out_path: Path,
+    label: str,
+    tips: list[str],
+    color: str = CHARACTERIZED_COLOR,
+    symbol_code: int = 3,  # 3 = star
+    size: int = 15,
+) -> None:
+    """Write a DATASET_SYMBOL file (used for characterized-gene landmarks)."""
+    lines = [
+        "DATASET_SYMBOL",
+        "SEPARATOR TAB",
+        f"DATASET_LABEL\t{label}",
+        f"COLOR\t{color}",
+        "MAXIMUM_SIZE\t20",
+        f"LEGEND_TITLE\t{label}",
+        "LEGEND_SHAPES\t3",
+        f"LEGEND_COLORS\t{color}",
+        f"LEGEND_LABELS\t{label}",
+        "DATA",
+    ]
+    # Format: ID  symbol  size  color  fill  position
+    for tip in sorted(tips):
+        lines.append(f"{tip}\t{symbol_code}\t{size}\t{color}\t1\t1")
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Per-OG iTOL rendering
+# ---------------------------------------------------------------------------
+
+def _render_og_itol(
+    tree: dendropy.Tree,
+    og_name: str,
+    og_out_dir: Path,
+    taxonomy: dict[str, dict[str, str]],
+    characterized: dict[str, dict[str, str]],
+    global_colors: dict,
+    tax_levels: list[str],
+    color_bar_groups: list[str],
+    heatmap_groups: list[str],
+    delimiter: str,
+) -> list[str]:
+    """Write all iTOL annotation files for one OG. Returns list of written files."""
+    og_out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+
+    tip_labels = _tree_tip_labels(tree)
+
+    # Tree copy (numbered newick)
+    tree_out = og_out_dir / "tree.nwk"
+    _write_numbered_newick(tree, tree_out)
+    written.append(tree_out.name)
+
+    # Taxonomy color strips
+    for rank in tax_levels:
+        tip_values: dict[str, str] = {}
+        for tip in tip_labels:
+            sp = _tip_to_species(tip, delimiter)
+            val = taxonomy.get(sp, {}).get(rank, "").strip()
+            if val:
+                tip_values[tip] = val
+        if tip_values:
+            path = og_out_dir / f"dataset_tax_{rank}.txt"
+            _write_colorstrip(
+                path,
+                label=f"Taxonomy: {rank}",
+                tip_values=tip_values,
+                color_map=global_colors["tax"][rank],
+            )
+            written.append(path.name)
+
+    # --color-bar groups
+    for gcol in color_bar_groups:
+        tip_values = {}
+        for tip in tip_labels:
+            sp = _tip_to_species(tip, delimiter)
+            val = (characterized.get(sp, {}).get(gcol) or "").strip()
+            if val:
+                tip_values[tip] = val
+        if tip_values:
+            path = og_out_dir / f"dataset_colorbar_{gcol}.txt"
+            _write_colorstrip(
+                path,
+                label=gcol.replace("group_", ""),
+                tip_values=tip_values,
+                color_map=global_colors["color_bar"][gcol],
+            )
+            written.append(path.name)
+
+    # --heatmap groups
+    for gcol in heatmap_groups:
+        meta = global_colors["heatmap"][gcol]
+        fields = meta["fields"]
+        if not fields:
+            continue
+        tip_sets: dict[str, set[str]] = {}
+        for tip in tip_labels:
+            sp = _tip_to_species(tip, delimiter)
+            raw = (characterized.get(sp, {}).get(gcol) or "").strip()
+            if raw:
+                tip_sets[tip] = {p.strip() for p in raw.split(";") if p.strip()}
+        if tip_sets:
+            path = og_out_dir / f"dataset_heatmap_{gcol}.txt"
+            _write_binary(
+                path,
+                label=gcol.replace("group_", ""),
+                field_labels=fields,
+                tip_sets=tip_sets,
+                group_color=meta["color"],
+            )
+            written.append(path.name)
+
+    # Characterized-gene landmarks
+    landmark_tips = [
+        tip for tip in tip_labels if _tip_to_species(tip, delimiter) in characterized
+    ]
+    if landmark_tips:
+        path = og_out_dir / "dataset_landmarks.txt"
+        _write_symbol(path, label="Characterized", tips=landmark_tips)
+        written.append(path.name)
+
+    return written
+
+
+def _write_upload_readme(out_dir: Path, og_names: list[str]) -> None:
+    """Write top-level instructions for uploading to iTOL."""
+    lines = [
+        "# Uploading to iTOL",
+        "",
+        "1. Go to https://itol.embl.de/ and sign in (free account).",
+        "2. Click **Upload new tree** and upload `itol/<OG>/tree.nwk`.",
+        "3. On the tree page, drag all `itol/<OG>/dataset_*.txt` files onto the browser",
+        "   window to load annotations. A panel will open on the right.",
+        "4. In the **Datasets** panel you can toggle tracks on/off, reorder, and",
+        "   adjust sizes. Each dataset has a built-in legend.",
+        "5. Use **Export** (top-right) to download PDF/SVG/PNG.",
+        "",
+        "## Identifying clades",
+        "",
+        "Internal node labels in the tree are formatted as `<UFBoot>/<SH-aLRT>/N<idx>`",
+        "(IQ-TREE support values plus a node index). To mark a clade, read the node",
+        "index off the tree and add a row to your `clades.tsv`:",
+        "",
+        "```",
+        "clade_name\tog_id\tnode_number",
+        "my_clade\tOG0000001\t42",
+        "```",
+        "",
+        "Then run `fungalphylo protsetphylo clade-mark`.",
+        "",
+        "## OGs included",
+        "",
+    ]
+    for og in og_names:
+        lines.append(f"- `itol/{og}/`")
+    lines.append("")
+    (out_dir / "iTOL_UPLOAD.md").write_text("\n".join(lines), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -364,36 +464,57 @@ def tree_export_command(
     ),
     tax_level: Optional[list[str]] = typer.Option(
         None, "--tax-level",
-        help="Taxonomy rank to display as color bar (repeatable: --tax-level order --tax-level family).",
+        help="Taxonomy rank for a color strip (repeatable, e.g. --tax-level order --tax-level family).",
     ),
-    delimiter: str = typer.Option("|", "--delimiter", help="Tip label delimiter (default: |)."),
-    width: int = typer.Option(800, "--width", help="Base tree width in pixels."),
-    height_per_tip: int = typer.Option(18, "--height-per-tip", help="Pixels per tip for height."),
+    color_bar: Optional[list[str]] = typer.Option(
+        None, "--color-bar",
+        help="group_* column to render as a single color strip (repeatable).",
+    ),
+    heatmap: Optional[list[str]] = typer.Option(
+        None, "--heatmap",
+        help="group_* column to render as a binary heatmap of atomic values (repeatable).",
+    ),
+    delimiter: str = typer.Option("|", "--delimiter", help="Tip label delimiter."),
     out_dir: Path | None = typer.Option(
         None, "--out-dir", help="Output directory (default: families/<id>/tree_export/).",
     ),
 ) -> None:
-    """Render gene trees as annotated PDF/SVG with node numbers, taxonomy, and groups."""
+    """Generate iTOL annotation files for gene trees in a phylo run.
+
+    Writes one folder per OG under ``tree_export/itol/<OG>/`` containing
+    ``tree.nwk`` and one ``dataset_*.txt`` per annotation track. Upload the
+    tree to iTOL, then drag the dataset files onto the tree page.
+    """
     project_dir = project_dir.expanduser().resolve()
     paths = ProjectPaths(project_dir)
     ensure_project_dirs(paths)
     init_db(paths.db_path)
 
-    tax_levels = tax_level or []
+    tax_levels = list(tax_level or [])
+    color_bar_groups = list(color_bar or [])
+    heatmap_groups = list(heatmap or [])
+
+    # Load annotation tables
+    characterized = _load_characterized(paths, family_id)
+    taxonomy = _load_taxonomy(paths, family_id) if tax_levels else {}
+
+    # Validate group columns exist
+    available_groups = _available_group_columns(characterized)
+    _validate_groups(color_bar_groups, available_groups, "--color-bar")
+    _validate_groups(heatmap_groups, available_groups, "--heatmap")
+    if tax_levels and not taxonomy:
+        raise typer.BadParameter(
+            "--tax-level was requested but no taxonomy.tsv found. "
+            "Run `fungalphylo taxonomy export/apply --family-id` first."
+        )
 
     # Find gene trees
     gene_trees_dir, resolved_run_id = _find_gene_trees_dir(paths, run_id)
-
-    # Collect tree files
     tree_files = sorted(gene_trees_dir.glob("*/*.treefile"))
     if not tree_files:
         raise typer.BadParameter(f"No .treefile files found in {gene_trees_dir}")
 
-    # Load annotations
-    taxonomy = _load_taxonomy(paths, family_id) if tax_levels else {}
-    characterized = _load_characterized(paths, family_id)
-
-    # Output directory
+    # Output directory layout
     if out_dir is None:
         out_dir = paths.family_dir(family_id) / "tree_export"
     else:
@@ -401,8 +522,19 @@ def tree_export_command(
     out_dir.mkdir(parents=True, exist_ok=True)
     numbered_dir = out_dir / "numbered_newick"
     numbered_dir.mkdir(parents=True, exist_ok=True)
+    itol_root = out_dir / "itol"
+    itol_root.mkdir(parents=True, exist_ok=True)
 
-    canvases: list[tuple[str, toyplot.canvas.Canvas]] = []
+    # Global color assignment (one palette for the whole family)
+    global_colors = _compute_global_colors(
+        characterized=characterized,
+        taxonomy=taxonomy,
+        tax_levels=tax_levels,
+        color_bar_groups=color_bar_groups,
+        heatmap_groups=heatmap_groups,
+    )
+
+    og_names: list[str] = []
     n_rendered = 0
     n_skipped = 0
 
@@ -410,36 +542,37 @@ def tree_export_command(
         og_name = tf.parent.name
         try:
             tree = _load_tree(tf)
-        except (ValueError, Exception) as e:
+        except Exception as e:
             typer.echo(f"  SKIP {og_name}: {e}")
             n_skipped += 1
             continue
 
-        # Number internal nodes
         tree = _number_internal_nodes(tree)
 
-        # Write numbered newick
+        # Write shared numbered newick (used by clade-mark)
         _write_numbered_newick(tree, numbered_dir / f"{og_name}.nwk")
 
-        # Render
-        canvas = _render_tree_page(
+        # Write iTOL dataset folder
+        _render_og_itol(
             tree=tree,
             og_name=og_name,
+            og_out_dir=itol_root / og_name,
             taxonomy=taxonomy,
             characterized=characterized,
+            global_colors=global_colors,
             tax_levels=tax_levels,
+            color_bar_groups=color_bar_groups,
+            heatmap_groups=heatmap_groups,
             delimiter=delimiter,
-            width=width,
-            height_per_tip=height_per_tip,
         )
-        canvases.append((og_name, canvas))
+
+        og_names.append(og_name)
         n_rendered += 1
 
-    if not canvases:
-        raise typer.BadParameter("No trees could be rendered.")
+    if not og_names:
+        raise typer.BadParameter("No trees could be loaded.")
 
-    # Write PDFs and SVGs
-    _write_individual_pdfs(canvases, out_dir / "trees.pdf")
+    _write_upload_readme(out_dir, og_names)
 
     log_event(
         project_dir,
@@ -451,12 +584,23 @@ def tree_export_command(
             "n_rendered": n_rendered,
             "n_skipped": n_skipped,
             "tax_levels": tax_levels,
+            "color_bar_groups": color_bar_groups,
+            "heatmap_groups": heatmap_groups,
             "out_dir": str(out_dir),
         },
     )
-    typer.echo(f"Rendered {n_rendered} trees ({n_skipped} skipped)")
-    typer.echo(f"  PDFs:             {out_dir / 'trees'}/")
-    typer.echo(f"  SVGs:             {out_dir / 'trees' / 'svg'}/")
+
+    typer.echo(f"Rendered iTOL datasets for {n_rendered} OGs ({n_skipped} skipped)")
+    typer.echo(f"  iTOL datasets:    {itol_root}/")
     typer.echo(f"  Numbered Newick:  {numbered_dir}/")
+    typer.echo(f"  Upload guide:     {out_dir / 'iTOL_UPLOAD.md'}")
     if tax_levels:
         typer.echo(f"  Tax levels:       {', '.join(tax_levels)}")
+    if color_bar_groups:
+        typer.echo(f"  Color bars:       {', '.join(color_bar_groups)}")
+    if heatmap_groups:
+        heatmap_summary = ", ".join(
+            f"{g} ({len(global_colors['heatmap'][g]['fields'])} fields)"
+            for g in heatmap_groups
+        )
+        typer.echo(f"  Heatmaps:         {heatmap_summary}")
