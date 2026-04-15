@@ -6,9 +6,11 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+import sqlite3
+
 from fungalphylo.cli.main import app
 from fungalphylo.core.paths import ProjectPaths
-from fungalphylo.db.db import connect
+from fungalphylo.db.db import _column_notnull, connect, init_db
 
 runner = CliRunner()
 
@@ -52,3 +54,52 @@ def test_db_command_rejects_write_queries(tmp_path: Path) -> None:
     result = runner.invoke(app, ["db", "--sql", "DELETE FROM portals", str(project_dir)])
     assert result.exit_code != 0
     assert "Only read-only" in result.output or "Write or schema-changing SQL is not allowed" in result.output
+
+
+def test_init_db_migrates_legacy_runs_staging_id_not_null(tmp_path: Path) -> None:
+    """init_db should upgrade old DBs where runs.staging_id was NOT NULL.
+
+    Older schemas marked runs.staging_id as NOT NULL, which breaks family-level
+    compute runs (no staging involved). The migration must drop the constraint
+    and preserve existing rows.
+    """
+    db_path = tmp_path / "legacy.db"
+    legacy_schema = """
+    CREATE TABLE stagings (staging_id TEXT PRIMARY KEY);
+    CREATE TABLE runs (
+      run_id          TEXT PRIMARY KEY,
+      staging_id      TEXT NOT NULL,
+      kind            TEXT NOT NULL,
+      created_at      TEXT NOT NULL,
+      manifest_path   TEXT NOT NULL,
+      manifest_sha256 TEXT NOT NULL,
+      FOREIGN KEY (staging_id) REFERENCES stagings(staging_id)
+    );
+    INSERT INTO stagings(staging_id) VALUES('stg_legacy');
+    INSERT INTO runs VALUES('run_old', 'stg_legacy', 'orthofinder', '2026-01-01', 'runs/run_old/manifest.json', 'abc');
+    """
+    raw = sqlite3.connect(str(db_path))
+    try:
+        raw.executescript(legacy_schema)
+        raw.commit()
+    finally:
+        raw.close()
+
+    init_db(db_path)
+
+    conn = connect(db_path)
+    try:
+        assert _column_notnull(conn, "runs", "staging_id") is False
+        row = conn.execute(
+            "SELECT staging_id, kind FROM runs WHERE run_id = 'run_old'"
+        ).fetchone()
+        assert row["staging_id"] == "stg_legacy"
+        assert row["kind"] == "orthofinder"
+        # Nullable insert now works (what family_phylo needs)
+        conn.execute(
+            "INSERT INTO runs(run_id, staging_id, kind, created_at, manifest_path, manifest_sha256) "
+            "VALUES('run_fam', NULL, 'family_phylo', '2026-04-15', 'runs/run_fam/manifest.json', 'def')"
+        )
+        conn.commit()
+    finally:
+        conn.close()

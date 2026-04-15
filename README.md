@@ -554,7 +554,23 @@ fungalphylo protsetphylo phylo-slurm \
   --family-id mfs_sugar --align-time 06:00:00\
   --align-cpus 16 --tree-time 24:00:00\
   --tree-mem-per-cpu 8G /path/to/project
+
+# With per-OG outgroup rooting
+fungalphylo protsetphylo phylo-slurm \
+  --family-id mfs_sugar \
+  --outgroup-fasta families/mfs_sugar/outgroups/outgroups.faa \
+  --outgroup-map   families/mfs_sugar/outgroups/outgroups.tsv \
+  /path/to/project
 ```
+
+**Outgroup rooting (optional).** After inspecting orthogroups, you can pick outgroup sequences per OG to root each gene tree. Provide two files:
+
+- **`--outgroup-fasta`** — a FASTA of outgroup protein sequences. Header IDs (first whitespace-delimited token) become the iqtree tip labels; use the same `{name}|{protein}` convention as the rest of the pipeline.
+- **`--outgroup-map`** — a TSV mapping outgroups to OGs. Columns: `og_id`, `outgroup_id`. Many-to-many: list one row per (OG, outgroup) pair; an outgroup can root multiple OGs and an OG can have multiple outgroups.
+
+At script-generation time, `phylo-slurm` validates the map against the input OGs and the outgroup FASTA (errors on unknown IDs), then for each mapped OG writes an **augmented FASTA** (`runs/<run_id>/augmented_input/<og>.fa` = original OG + mapped outgroup records, deduped by header) and substitutes that path into the filelist. A companion `runs/<run_id>/slurm/outgroup_tips.tsv` is written; the worker reads it at the tree step and passes `-o <tips>` to IQ-TREE for OGs that have outgroups. OGs without a mapping fall back to default rooting. Outgroups never enter OrthoFinder — they're injected only at alignment time, so upstream ortholog inference is untouched.
+
+The augmented FASTAs live inside the run directory, not under `families/`, so each run is a self-contained snapshot of exactly what was aligned. Rerunning `phylo-slurm` with a different `outgroups.tsv` produces a fresh run rather than mutating an old one.
 
 **How it works**: The orchestrator chains three array submissions with `--dependency=afterok:`, each with different SLURM resources:
 
@@ -792,6 +808,7 @@ fungalphylo db query /path/to/project "SELECT * FROM families"
 | `--max-array-size` | phylo-slurm, protsetphylo phylo-slurm | Max tasks per submission (default: 380) |
 | `--iqtree-fast` | protsetphylo phylo-slurm | Use IQ-TREE `-fast` mode |
 | `--align-time`, `--tree-time`, etc. | protsetphylo phylo-slurm | Per-step SLURM resource overrides |
+| `--outgroup-fasta`, `--outgroup-map` | protsetphylo phylo-slurm | Per-OG outgroup rooting (FASTA + og_id/outgroup_id TSV) |
 | `--og-only` | orthofinder-slurm | Stop after orthogroup sequences (`-M msa -os`) |
 | `--orientation` | protsetphylo og-report | Table orientation: horizontal or vertical |
 | `--no-placed` | protsetphylo og-report, og-apply | Ignore og_placed/ and placements.tsv |
